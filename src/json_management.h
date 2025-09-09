@@ -105,5 +105,22 @@ bool loadConfig(DynamicJsonDocument &config, const char* filename) {
     return true;
 }
 
+bool saveConfig(const DynamicJsonDocument &config, const char* filename) {
+    File file = SD.open(filename, FILE_WRITE);
+    if (!file) {
+        M5Cardputer.Display.println("[-] Failed to open config file for writing.");
+        return false;
+    }
+
+    if (serializeJsonPretty(config, file) == 0) {
+        M5Cardputer.Display.println("[-] Failed to write to config file.");
+        file.close();
+        return false;
+    }
+
+    file.close();
+    return true;
+}
+
 //TODO: add functions to add, remove, edit contacts in the DynamicJsonDocument
 //TODO: add function to load message history from file (also unload to save memory on leave)

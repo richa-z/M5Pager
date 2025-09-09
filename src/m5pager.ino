@@ -20,7 +20,7 @@
 #define SD_MISO 39
 
 // === CONFIG ===
-const int BUFFER_SIZE PROGMEM = 2048;
+const int BUFFER_SIZE PROGMEM = 4096;
 
 MenuState currentMenu = MENU_MAIN;
 
