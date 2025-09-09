@@ -9,6 +9,10 @@
 
 #include "network_util.h"
 #include "json_management.h"
+#include "gui_handlers.h"
+#include "menus.h"
+#include "menu_main.h"
+#include "menu_contacts.h"
 
 #define SD_CS 12
 #define SD_MOSI 14
@@ -16,7 +20,25 @@
 #define SD_MISO 39
 
 // === CONFIG ===
-const int BUFFER_SIZE PROGMEM = 256;
+const int BUFFER_SIZE PROGMEM = 2048;
+
+MenuState currentMenu = MENU_MAIN;
+
+int menuIndex = 0;
+const char* mainMenuItems[] = {
+    "Contacts",
+    "Messages",
+    "Network",
+    "Settings"
+};
+
+const int mainMenuSize = sizeof(mainMenuItems) / sizeof(mainMenuItems[0]);
+
+MenuHandler menus[] = {
+  {drawMainMenu, handleMainMenuInput},
+  {drawContactsMenu, handleContactsMenuInput}
+  //TODO: Add other menus here later
+};
 
 const char* ssid PROGMEM = "PAGER_COM";
 const char* password PROGMEM = "12345678";
@@ -73,31 +95,8 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     M5Cardputer.Display.println("[+] Message: " + String(msgIncoming.msg) + "\n");
 }
 
-int menuIndex = 0;
-const char* mainMenuItems[] = {
-    "Contacts",
-    "Messages",
-    "Network",
-    "Settings"
-};
 
-const int mainMenuSize = sizeof(mainMenuItems) / sizeof(mainMenuItems[0]);
 
-void drawMenu() {
-    M5Cardputer.Display.fillScreen(0);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.setTextFont(2);
-
-    for (size_t i = 0; i < mainMenuSize; i++) {
-        if (i == menuIndex) {
-            M5Cardputer.Display.setTextColor(BLACK, WHITE);
-        } else {
-            M5Cardputer.Display.setTextColor(WHITE, BLACK);
-        }
-        M5Cardputer.Display.println(mainMenuItems[i]);
-    } 
-}
 
 void setup() {
   Serial.begin(9600);
@@ -190,40 +189,36 @@ void setup() {
   //typewriter effect for nice welcome message :3
   const char* user = config["username"];
   String welcomeMsg = "Welcome back, " + String(user) + "!\n";
+  M5Cardputer.Display.setCursor(M5Cardputer.Display.width() / 2 - welcomeMsg.length() * 3, M5Cardputer.Display.height() / 2 - 4);
   for (size_t i = 0; i < welcomeMsg.length(); i++) {
       M5Cardputer.Display.print(welcomeMsg[i]);
       delay(100);
   }
 
   delay(2000);
-  drawMenu();
+  menus[currentMenu].draw();
 }
+
+MenuState previousMenu = MENU_MAIN;
 
 void loop() {
   M5Cardputer.update();
 
-  //UP
-  if (M5Cardputer.Keyboard.isKeyPressed(';')) {
-    menuIndex = (menuIndex - 1 + mainMenuSize) % mainMenuSize;
-    drawMenu();
-    delay(150);
+  int key = 0;
+  if (M5Cardputer.Keyboard.isKeyPressed(';')) key = ';'; //UP
+  if (M5Cardputer.Keyboard.isKeyPressed('.')) key = '.'; //DOWN
+  if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) key = KEY_ENTER; //SELECT
+  if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) key = KEY_BACKSPACE; //BACK
+
+  if (key != 0) {
+      menus[currentMenu].handleInput(key);
+      delay(150);
   }
 
-  //DOWN
-  if (M5Cardputer.Keyboard.isKeyPressed('.') ) {
-    menuIndex = (menuIndex + 1) % mainMenuSize;
-    drawMenu();
-    delay(150);
-  }
-
-  //ENTER
-  if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
-    M5Cardputer.Display.fillScreen(0);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.println("Selected: " + String(mainMenuItems[menuIndex]));
-    delay(1000);
-    drawMenu();
-    delay(150);
+  if (currentMenu != previousMenu) {
+      M5Cardputer.Display.fillScreen(0);
+      menus[currentMenu].draw();
+      previousMenu = currentMenu;
+      menuIndex = 0;
   }
 }
