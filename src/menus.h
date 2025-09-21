@@ -4,7 +4,7 @@
 enum MenuState {
     MENU_MAIN,
     MENU_CONTACTS,
-    MENU_MESSAGES,
+    MENU_MESSAGE,
     MENU_NETWORK,
     MENU_SETTINGS
 };

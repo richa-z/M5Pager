@@ -21,9 +21,8 @@ void handleMainMenuInput(int key) {
     } else if (key == KEY_ENTER) {
         switch (menuIndex) {
             case 0: currentMenu = MENU_CONTACTS; break;
-            case 1: currentMenu = MENU_MESSAGES; break;
-            case 2: currentMenu = MENU_NETWORK; break;
-            case 3: currentMenu = MENU_SETTINGS; break;
+            case 1: currentMenu = MENU_NETWORK; break;
+            case 2: currentMenu = MENU_SETTINGS; break;
         }
     }
 }

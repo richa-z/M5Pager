@@ -6,6 +6,7 @@
 #include <M5Cardputer.h>
 #include <SD.h>
 #include <SPI.h>
+#include <stdint.h>
 
 #include "network_util.h"
 #include "json_management.h"
@@ -13,6 +14,9 @@
 #include "menus.h"
 #include "menu_main.h"
 #include "menu_contacts.h"
+#include "menu_messsage.h"
+
+#include "packet_types.h"
 
 #define SD_CS 12
 #define SD_MOSI 14
@@ -27,16 +31,19 @@ MenuState currentMenu = MENU_MAIN;
 int menuIndex = 0;
 const char* mainMenuItems[] = {
     "Contacts",
-    "Messages",
     "Network",
     "Settings"
 };
 
 const int mainMenuSize = sizeof(mainMenuItems) / sizeof(mainMenuItems[0]);
+int contactsSize = 0;
 
 MenuHandler menus[] = {
   {drawMainMenu, handleMainMenuInput},
-  {drawContactsMenu, handleContactsMenuInput}
+  {drawContactsMenu, handleContactsMenuInput},
+  {drawMessageMenu, handleMessageInput},
+  {nullptr, nullptr},
+  {nullptr, nullptr}
   //TODO: Add other menus here later
 };
 
@@ -44,9 +51,12 @@ const char* ssid PROGMEM = "PAGER_COM";
 const char* password PROGMEM = "12345678";
 
 uint8_t selectedMac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+const char* selectedContact = nullptr;
+
 bool isAP = false;
 
 typedef struct MessageStruct {
+  PacketType type;
   uint8_t from[6];
   char msg[BUFFER_SIZE];
 } MessageStruct;
@@ -60,8 +70,6 @@ SPIClass spi = SPIClass(FSPI);
 DynamicJsonDocument contacts(8192);
 DynamicJsonDocument config(1024);
 
-JsonObject username;
-
 char inputBuffer[BUFFER_SIZE];
 int bytesRead;
 bool messageSentFlag = false;
@@ -73,26 +81,36 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 }
 
 void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
-    if (data_len > sizeof(msgIncoming.msg) + sizeof(msgIncoming.from)) {
+    if (data_len > sizeof(msgIncoming.msg) + sizeof(msgIncoming.from) + sizeof(msgIncoming.type)) {
         M5Cardputer.Display.println("[-] Received data too large.");
         return;
     }
 
-    if (data_len - 6 > BUFFER_SIZE) {
+    if (data_len - sizeof(msgIncoming.from) - sizeof(msgIncoming.type) > BUFFER_SIZE) {
         M5Cardputer.Display.println("[-] Message too long.");
         return;
     }
 
-    memcpy(msgIncoming.msg, data, data_len - sizeof(msgIncoming.from));
-    msgIncoming.msg[data_len - sizeof(msgIncoming.from)] = '\0';
+    int msg_len = data_len - sizeof(msgIncoming.from) - sizeof(msgIncoming.type);
+    memcpy(msgIncoming.msg, data, msg_len);
+    msgIncoming.msg[msg_len] = '\0';
     memcpy(msgIncoming.from, mac_addr, 6);
+
+    String msg = String(msgIncoming.msg);
+
+    switch (msgIncoming.type) {
+      case P_BOARD_ONLINE:
+        
+
+    }
 
     //TODO: Sound buzzer
     M5Cardputer.Display.println("[!] Message received.");
     Serial.printf("[+] From: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                  mac_addr[0], mac_addr[1], mac_addr[2],
-                  mac_addr[3], mac_addr[4], mac_addr[5]);
-    M5Cardputer.Display.println("[+] Message: " + String(msgIncoming.msg) + "\n");
+                mac_addr[0], mac_addr[1], mac_addr[2],
+                mac_addr[3], mac_addr[4], mac_addr[5]);
+    M5Cardputer.Display.println("[+] Message: " + msg + "\n");
+    
 }
 
 
@@ -220,5 +238,6 @@ void loop() {
       menus[currentMenu].draw();
       previousMenu = currentMenu;
       menuIndex = 0;
+      delay(150);
   }
 }

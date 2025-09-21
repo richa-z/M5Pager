@@ -5,9 +5,10 @@
 
 extern DynamicJsonDocument contacts;
 extern int menuIndex;
+extern const char* selectedContact;
 
 void drawContactsMenu() {
-    drawContacts(contacts, menuIndex);
+    selectedContact = drawContacts(contacts, menuIndex);
 }
 
 void handleContactsMenuInput(int key) {
@@ -20,5 +21,10 @@ void handleContactsMenuInput(int key) {
     } else if (key == '.') {
         menuIndex = (menuIndex + 1) % mainMenuSize;
         drawContactsMenu();
+    }
+    else if (key == KEY_ENTER) {
+        if (selectedContact != nullptr) {
+            currentMenu = MENU_MESSAGE;
+        }
     }
 }
