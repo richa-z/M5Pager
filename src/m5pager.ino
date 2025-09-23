@@ -98,10 +98,34 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
 
     String msg = String(msgIncoming.msg);
 
-    switch (msgIncoming.type) {
-      case P_BOARD_ONLINE:
-        
-
+    switch(msgIncoming.type) {
+        case P_MSG:
+            //normal message
+            break;
+        case P_BOARD_ONLINE:
+            M5Cardputer.Display.println("[+] Board online packet received.");
+            return;
+        case P_MSG_ACK:
+            M5Cardputer.Display.println("[+] Message delivery ACK received.");
+            return;
+        case P_MSG_FWD:
+            M5Cardputer.Display.println("[+] Forwarded message received.");
+            return;
+        case P_INIT_EXCH:
+            M5Cardputer.Display.println("[+] Key exchange init received. (Not implemented)");
+            return;
+        case P_ACK_EXCH:
+            M5Cardputer.Display.println("[+] Key exchange ACK received. (Not implemented)");
+            return;
+        case P_AES_EXCH:
+            M5Cardputer.Display.println("[+] AES key exchange received. (Not implemented)");
+            return;
+        case P_EXCH_OK:
+            M5Cardputer.Display.println("[+] Key exchange complete received. (Not implemented)");
+            return;
+        default:
+            M5Cardputer.Display.println("[-] Unknown packet type received.");
+            return;
     }
 
     //TODO: Sound buzzer
@@ -138,6 +162,8 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   
+
+  //this might not be necessary, but just in case
   if (ScanAP(ssid)) {
     M5Cardputer.Display.println("[+] Network exists. Connecting.");
     WiFi.begin(ssid, password);
