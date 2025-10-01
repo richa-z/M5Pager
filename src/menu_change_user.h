@@ -19,6 +19,7 @@ void drawChangeUsername() {
 void handleChangeUsernameInput(int key) {
     if (key == '`') {
         menuIndex = 0;
+        newUsername = "";
         currentMenu = MENU_SETTINGS;
         return;
     } else if (key == KEY_BACKSPACE) {

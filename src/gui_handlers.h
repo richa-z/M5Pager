@@ -152,7 +152,7 @@ void changeUsername(String newUsername) {
     String changeUserLabel = "Type your username below:";
     M5Cardputer.Display.setCursor(M5Cardputer.Display.width() / 2 - changeUserLabel.length() * 3.5, M5Cardputer.Display.height() / 2 - 4);
     M5Cardputer.Display.println(changeUserLabel);
-    M5Cardputer.Display.setCursor(M5Cardputer.Display.width() / 2 - newUsername.length() * 2, M5Cardputer.Display.height() / 2 + 16);
+    M5Cardputer.Display.setCursor(M5Cardputer.Display.width() / 2 - newUsername.length() * 2.5, M5Cardputer.Display.height() / 2 + 16);
     M5Cardputer.Display.println(newUsername);
 }
 
