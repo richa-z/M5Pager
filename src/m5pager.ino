@@ -11,10 +11,13 @@
 #include "network_util.h"
 #include "json_management.h"
 #include "gui_handlers.h"
+
 #include "menus.h"
 #include "menu_main.h"
 #include "menu_contacts.h"
 #include "menu_messsage.h"
+#include "menu_settings.h"
+#include "menu_change_user.h"
 
 #include "packet_types.h"
 
@@ -31,7 +34,6 @@ MenuState currentMenu = MENU_MAIN;
 int menuIndex = 0;
 const char* mainMenuItems[] = {
     "Contacts",
-    "Network",
     "Settings"
 };
 
@@ -42,8 +44,8 @@ MenuHandler menus[] = {
   {drawMainMenu, handleMainMenuInput},
   {drawContactsMenu, handleContactsMenuInput},
   {drawMessageMenu, handleMessageInput},
-  {nullptr, nullptr},
-  {nullptr, nullptr}
+  {drawSettingsMenu, handleSettingsMenuInput},
+  {drawChangeUsername, handleChangeUsernameInput}
   //TODO: Add other menus here later
 };
 
@@ -74,6 +76,8 @@ char inputBuffer[BUFFER_SIZE];
 int bytesRead;
 bool messageSentFlag = false;
 bool isCmd = false; // cli-testing
+
+const char* user = "User";
 
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
     Serial.print("[+] Last Packet Send Status: ");
@@ -231,7 +235,7 @@ void setup() {
   M5Cardputer.Display.setTextSize(1);
 
   //typewriter effect for nice welcome message :3
-  const char* user = config["username"];
+  user = config["username"];
   String welcomeMsg = "Welcome back, " + String(user) + "!\n";
   M5Cardputer.Display.setCursor(M5Cardputer.Display.width() / 2 - welcomeMsg.length() * 3, M5Cardputer.Display.height() / 2 - 4);
   for (size_t i = 0; i < welcomeMsg.length(); i++) {
@@ -249,8 +253,17 @@ void loop() {
   M5Cardputer.update();
 
   int key = 0;
-  if (M5Cardputer.Keyboard.isKeyPressed(';')) key = ';'; //UP
-  if (M5Cardputer.Keyboard.isKeyPressed('.')) key = '.'; //DOWN
+
+  //check all ascii keys
+    for (char c = 32; c <= 126; c++) {
+        if (M5Cardputer.Keyboard.isKeyPressed(c)) {
+            key = c;
+            break;
+        }
+    }
+
+
+  //up and down are ; and . respecively, handled in the loop above
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) key = KEY_ENTER; //SELECT
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) key = KEY_BACKSPACE; //BACK
 

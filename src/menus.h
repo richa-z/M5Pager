@@ -5,8 +5,8 @@ enum MenuState {
     MENU_MAIN,
     MENU_CONTACTS,
     MENU_MESSAGE,
-    MENU_NETWORK,
-    MENU_SETTINGS
+    MENU_SETTINGS,
+    MENU_CHANGE_USERNAME
 };
 
 

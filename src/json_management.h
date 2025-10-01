@@ -1,3 +1,5 @@
+#pragma once
+
 #include <SD.h>
 #include <ArduinoJson.h>
 #include <M5Cardputer.h>
