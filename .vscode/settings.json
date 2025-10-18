@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "*.asm": "aspnetcorerazor",
-        "typeinfo": "cpp"
+        "typeinfo": "cpp",
+        "string": "cpp"
     }
 }

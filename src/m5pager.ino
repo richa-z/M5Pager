@@ -60,6 +60,8 @@ bool isAP = false;
 typedef struct MessageStruct {
   PacketType type;
   uint8_t from[6];
+  uint8_t split_size;
+  uint8_t split_index;
   char msg[BUFFER_SIZE];
 } MessageStruct;
 
@@ -75,7 +77,6 @@ DynamicJsonDocument config(1024);
 char inputBuffer[BUFFER_SIZE];
 int bytesRead;
 bool messageSentFlag = false;
-bool isCmd = false; // cli-testing
 
 const char* user = "User";
 
@@ -151,6 +152,9 @@ void setup() {
   M5Cardputer.Display.setTextFont(2);
   M5Cardputer.Display.setTextSize(0.75);
   M5Cardputer.Display.println("Starting...");
+  M5Cardputer.Speaker.begin();
+  M5Cardputer.Speaker.setVolume(10);
+  M5Cardputer.Speaker.tone(1000, 100);
   spi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
 
   if (!SD.begin(SD_CS, spi, 4000000)) {

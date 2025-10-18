@@ -11,6 +11,7 @@ extern MenuState currentMenu;
 extern int contactsSize;
 
 extern DynamicJsonDocument config;
+extern const char* user;
 const char* settingsItems[] = {
     "Username",
     "MAC: " //read-only
@@ -64,7 +65,8 @@ const char* drawContacts(DynamicJsonDocument& contacts, int selectedIdx = 0) {
         } else {
             M5Cardputer.Display.setTextColor(WHITE, BLACK);
         }
-        M5Cardputer.Display.println(kvp.key().c_str());
+        const char* name = kvp.value()["username"];
+        M5Cardputer.Display.println(name);
         counter++;
     }
 
@@ -87,16 +89,18 @@ void drawMessages(DynamicJsonDocument& contactsJson, const char* selectedContact
     M5Cardputer.Display.setTextSize(1);
     M5Cardputer.Display.setTextFont(2);
 
+    String person = String(contactsJson[selectedContact]["username"].as<const char*>());
+
     if (selectedContact != nullptr) {
         M5Cardputer.Display.setTextColor(WHITE, BLACK);
-        M5Cardputer.Display.println(selectedContact);
+        M5Cardputer.Display.println(person);
         drawSeparator();
 
         // Display messages for the selected contact
         if (contactsJson.containsKey(selectedContact)) {
             JsonArray messages = contactsJson[selectedContact]["messages"].as<JsonArray>();
             for (JsonVariant msg : messages) {
-                const char* type = msg["type"];
+                const char* type = msg["type"] == "in" ? person.c_str() : user;
                 const char* text = msg["text"];
                 String formattedLine = "[" + String(type) + "] " + String(text);
                 M5Cardputer.Display.println(formattedLine);
