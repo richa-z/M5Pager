@@ -8,7 +8,7 @@
 #include <SPI.h>
 #include <stdint.h>
 
-#include "network_util.h"
+#include "util/network_util.h"
 #include "json_management.h"
 #include "gui_handlers.h"
 
@@ -27,8 +27,9 @@
 #define SD_CLK 40
 #define SD_MISO 39
 
+#define MSG_CHUNK_SIZE 180
+
 // === CONFIG ===
-const int BUFFER_SIZE PROGMEM = 4096;
 
 MenuState currentMenu = MENU_MAIN;
 
@@ -61,13 +62,26 @@ bool isAP = false;
 typedef struct MessageStruct {
   PacketType type;
   uint8_t from[6];
+
+  uint16_t message_id;
   uint8_t split_size;
   uint8_t split_index;
-  char msg[BUFFER_SIZE];
+
+  uint8_t data_len;
+  char msg[MSG_CHUNK_SIZE];
 } MessageStruct;
+
+typedef struct IncomingAssembly {
+    uint16_t message_id;
+    uint8_t expected_parts;
+    bool received[32];
+    String data;
+} IncomingAssembly;
 
 MessageStruct msgIncoming;
 MessageStruct msgOutgoing;
+
+IncomingAssembly assembly{};
 
 esp_now_peer_info_t peerInfo;
 
@@ -75,11 +89,43 @@ SPIClass spi = SPIClass(FSPI);
 DynamicJsonDocument contacts(8192);
 DynamicJsonDocument config(1024);
 
-char inputBuffer[BUFFER_SIZE];
+char inputBuffer[MSG_CHUNK_SIZE];
 int bytesRead;
 bool messageSentFlag = false;
 
 const char* user = "User";
+
+/*
+
+NETWORKING
+
+*/
+
+void sendSplitMessage(const uint8_t* targetMac, const String& text) {
+    static uint16_t messageCounter = 0;
+    messageCounter++;
+
+    uint16_t msgId = messageCounter;
+    int totalLen = text.length();
+    uint8_t totalParts = (totalLen + MSG_CHUNK_SIZE - 1) / MSG_CHUNK_SIZE;
+
+    for (uint8_t i = 0; i < totalParts; i++) {
+        MessageStruct pkt{};
+        pkt.type = P_MSG;
+        esp_read_mac(pkt.from, ESP_MAC_WIFI_STA);
+
+        pkt.message_id = msgId;
+        pkt.split_size = totalParts;
+        pkt.split_index = i;
+
+        int offset = i * MSG_CHUNK_SIZE;
+        pkt.data_len = min(MSG_CHUNK_SIZE, totalLen - offset);
+        memcpy(pkt.msg, text.c_str() + offset, pkt.data_len);
+
+        esp_now_send(targetMac, (uint8_t*)&pkt, sizeof(MessageStruct) - MSG_CHUNK_SIZE + pkt.data_len);
+        delay(10); // brief delay to avoid overwhelming the receiver
+    }
+}
 
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
     Serial.print("[+] Last Packet Send Status: ");
@@ -87,69 +133,47 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 }
 
 void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
-    if (data_len > sizeof(msgIncoming.msg) + sizeof(msgIncoming.from) + sizeof(msgIncoming.type)) {
-        M5Cardputer.Display.println("[-] Received data too large.");
-        return;
+    if (data_len < sizeof(MessageStruct) - MSG_CHUNK_SIZE) return;
+
+    MessageStruct pkt;
+    memcpy(&pkt, data, data_len);
+
+    if (pkt.type != P_MSG) return;
+
+    if (pkt.split_index == 0) {
+        assembly = {};
+        assembly.message_id = pkt.message_id;
+        assembly.expected_parts = pkt.split_size;
+        assembly.data.reserve(pkt.split_size * MSG_CHUNK_SIZE);
     }
 
-    if (data_len - sizeof(msgIncoming.from) - sizeof(msgIncoming.type) > BUFFER_SIZE) {
-        M5Cardputer.Display.println("[-] Message too long.");
-        return;
+    if (pkt.message_id != assembly.message_id) return;
+    if (pkt.split_index >= 32) return;
+
+    if (!assembly.received[pkt.split_index]) {
+        assembly.received[pkt.split_index] = true;
+        assembly.data += String(pkt.msg).substring(0, pkt.data_len);
     }
 
-    int msg_len = data_len - sizeof(msgIncoming.from) - sizeof(msgIncoming.type);
-    memcpy(msgIncoming.msg, data, msg_len);
-    msgIncoming.msg[msg_len] = '\0';
-    memcpy(msgIncoming.from, mac_addr, 6);
-
-    String msg = String(msgIncoming.msg);
-    String senderMac = "";
-
-    switch(msgIncoming.type) {
-        case P_MSG:
-            senderMac = macToString(mac_addr);
-            appendMessage(contacts, senderMac, "in", msgIncoming.msg);
-
-            if (currentMenu == MENU_MESSAGE && selectedContact != nullptr && senderMac == selectedContact) {
-                drawMessageMenu();
-            }
+    bool complete = true;
+    for (uint8_t i = 0; i < assembly.expected_parts; i++) {
+        if (!assembly.received[i]) {
+            complete = false;
             break;
-        case P_BOARD_ONLINE:
-            M5Cardputer.Display.println("[+] Board online packet received.");
-            return;
-        case P_MSG_ACK:
-            M5Cardputer.Display.println("[+] Message delivery ACK received.");
-            return;
-        case P_MSG_FWD:
-            M5Cardputer.Display.println("[+] Forwarded message received.");
-            return;
-        case P_INIT_EXCH:
-            M5Cardputer.Display.println("[+] Key exchange init received. (N/I)");
-            return;
-        case P_ACK_EXCH:
-            M5Cardputer.Display.println("[+] Key exchange ACK received. (N/I)");
-            return;
-        case P_AES_EXCH:
-            M5Cardputer.Display.println("[+] AES key exchange received. (N/I)");
-            return;
-        case P_EXCH_OK:
-            M5Cardputer.Display.println("[+] Key exchange complete received. (N/I)");
-            return;
-        default:
-            M5Cardputer.Display.println("[-] Unknown packet type received.");
-            return;
+        }
     }
 
-    M5Cardputer.Display.println("[!] Message received.");
-    Serial.printf("[+] From: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                mac_addr[0], mac_addr[1], mac_addr[2],
-                mac_addr[3], mac_addr[4], mac_addr[5]);
-    M5Cardputer.Display.println("[+] Message: " + msg + "\n");
-    
+    if (complete) {
+        String senderMac = macToString(mac_addr);
+        appendMessage(contacts, senderMac, "in", assembly.data.c_str());
+
+        if (currentMenu == MENU_MESSAGE &&
+            selectedContact &&
+            senderMac == selectedContact) {
+            drawMessageMenu();
+        }
+    }
 }
-
-
-
 
 void setup() {
   auto cfg = M5.config();

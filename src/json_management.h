@@ -4,7 +4,7 @@
 #include <ArduinoJson.h>
 #include <M5Cardputer.h>
 
-#include "util.h"
+#include "util/util.h"
 
 bool loadContacts(DynamicJsonDocument &contacts, const char* filename) {
     M5Cardputer.Display.println("[*] Loading contacts...");

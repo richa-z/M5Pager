@@ -8,6 +8,8 @@
 #include <M5Cardputer.h>
 #include <ArduinoJson.h>
 
+#include "util/text_input.h"
+
 extern MenuState currentMenu;
 extern DynamicJsonDocument contacts;
 
@@ -51,24 +53,14 @@ void drawAddContact() {
 }
 
 void handleAddContactInput(int key) {
+bool changed = false;
+
     if (key == '`') {
         if (addStep == ADD_NAME) {
             currentMenu = MENU_CONTACTS;
             return;
         }
         addStep = (AddContactStep)(addStep - 1);
-        drawAddContact();
-        return;
-    }
-
-    if (key == KEY_BACKSPACE || key == '*') {
-        if (addStep == ADD_NAME && newContactName.length() > 0) {
-                newContactName.remove(newContactName.length() - 1);   
-        } 
-        else if (addStep == ADD_MAC && newContactMac.length() > 0) {
-                newContactMac.remove(newContactMac.length() - 1);   
-        }
-
         drawAddContact();
         return;
     }
@@ -97,13 +89,13 @@ void handleAddContactInput(int key) {
         return;
     }
 
-    // TEXT INPUT
-    if (key >= 32 && key <= 126) {
-        if (addStep == ADD_NAME) {
-            newContactName += (char)key;
-        } else if (addStep == ADD_MAC) {
-            newContactMac += (char)key;
-        }
+    if (addStep == ADD_NAME) {
+        changed = handleTextInput(key, newContactName, 16);
+    } else if (addStep == ADD_MAC) {
+        changed = handleTextInput(key, newContactMac, 17); //XX:XX:XX:XX:XX:XX
+    }
+
+    if (changed) {
         drawAddContact();
     }
 }
