@@ -12,6 +12,8 @@
 #include "json_management.h"
 #include "gui_handlers.h"
 
+#include "enums/packet_types.h"
+
 #include "menus.h"
 #include "menus/menu_main.h"
 #include "menus/menu_contacts.h"
@@ -19,8 +21,10 @@
 #include "menus/menu_settings.h"
 #include "menus/menu_change_user.h"
 #include "menus/menu_add_contact.h"
+#include "menus/menu_contact_options.h"
+#include "menus/menu_edit_contact.h"
 
-#include "enums/packet_types.h"
+
 
 #define SD_CS 12
 #define SD_MOSI 14
@@ -48,7 +52,9 @@ MenuHandler menus[] = {
   {drawMessageMenu, handleMessageInput},
   {drawSettingsMenu, handleSettingsMenuInput},
   {drawChangeUsername, handleChangeUsernameInput},
-  {drawAddContact, handleAddContactInput}
+  {drawAddContact, handleAddContactInput},
+  {drawContactOptions, handleContactOptionsInput},
+  {drawEditContact, handleEditContactInput}
 };
 
 const char* ssid PROGMEM = "PAGER_COM";
@@ -94,6 +100,7 @@ int bytesRead;
 bool messageSentFlag = false;
 
 const char* user = "User";
+String editContactName = "";
 
 /*
 

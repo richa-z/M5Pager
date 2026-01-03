@@ -16,6 +16,12 @@ void drawMessageMenu() {
 void handleMessageInput(int key) {
     if (key == KEY_BACKSPACE) {
         currentMenu = MENU_CONTACTS;
-    } 
+    }
+
+    if (key == '`') {
+        menuIndex = 0;
+        currentMenu = MENU_CONTACT_OPTIONS;
+        return;
+    }
     // TODO: Implement message sending, scrolling, etc.
 }
