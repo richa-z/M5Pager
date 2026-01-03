@@ -13,13 +13,14 @@
 #include "gui_handlers.h"
 
 #include "menus.h"
-#include "menu_main.h"
-#include "menu_contacts.h"
-#include "menu_messsage.h"
-#include "menu_settings.h"
-#include "menu_change_user.h"
+#include "menus/menu_main.h"
+#include "menus/menu_contacts.h"
+#include "menus/menu_messsage.h"
+#include "menus/menu_settings.h"
+#include "menus/menu_change_user.h"
+#include "menus/menu_add_contact.h"
 
-#include "packet_types.h"
+#include "enums/packet_types.h"
 
 #define SD_CS 12
 #define SD_MOSI 14
@@ -45,12 +46,12 @@ MenuHandler menus[] = {
   {drawContactsMenu, handleContactsMenuInput},
   {drawMessageMenu, handleMessageInput},
   {drawSettingsMenu, handleSettingsMenuInput},
-  {drawChangeUsername, handleChangeUsernameInput}
-  //TODO: Add other menus here later
+  {drawChangeUsername, handleChangeUsernameInput},
+  {drawAddContact, handleAddContactInput}
 };
 
 const char* ssid PROGMEM = "PAGER_COM";
-const char* password PROGMEM = "12345678";
+const char* password PROGMEM = "sd65fd4Fd4_dKAIu::?_a5df4sd";
 
 uint8_t selectedMac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 const char* selectedContact = nullptr;
@@ -102,10 +103,16 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     memcpy(msgIncoming.from, mac_addr, 6);
 
     String msg = String(msgIncoming.msg);
+    String senderMac = "";
 
     switch(msgIncoming.type) {
         case P_MSG:
-            //normal message
+            senderMac = macToString(mac_addr);
+            appendMessage(contacts, senderMac, "in", msgIncoming.msg);
+
+            if (currentMenu == MENU_MESSAGE && selectedContact != nullptr && senderMac == selectedContact) {
+                drawMessageMenu();
+            }
             break;
         case P_BOARD_ONLINE:
             M5Cardputer.Display.println("[+] Board online packet received.");
@@ -117,23 +124,22 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
             M5Cardputer.Display.println("[+] Forwarded message received.");
             return;
         case P_INIT_EXCH:
-            M5Cardputer.Display.println("[+] Key exchange init received. (Not implemented)");
+            M5Cardputer.Display.println("[+] Key exchange init received. (N/I)");
             return;
         case P_ACK_EXCH:
-            M5Cardputer.Display.println("[+] Key exchange ACK received. (Not implemented)");
+            M5Cardputer.Display.println("[+] Key exchange ACK received. (N/I)");
             return;
         case P_AES_EXCH:
-            M5Cardputer.Display.println("[+] AES key exchange received. (Not implemented)");
+            M5Cardputer.Display.println("[+] AES key exchange received. (N/I)");
             return;
         case P_EXCH_OK:
-            M5Cardputer.Display.println("[+] Key exchange complete received. (Not implemented)");
+            M5Cardputer.Display.println("[+] Key exchange complete received. (N/I)");
             return;
         default:
             M5Cardputer.Display.println("[-] Unknown packet type received.");
             return;
     }
 
-    //TODO: Sound buzzer
     M5Cardputer.Display.println("[!] Message received.");
     Serial.printf("[+] From: %02X:%02X:%02X:%02X:%02X:%02X\n",
                 mac_addr[0], mac_addr[1], mac_addr[2],
@@ -146,25 +152,19 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
 
 
 void setup() {
-  Serial.begin(9600);
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
   M5Cardputer.Display.setTextFont(2);
   M5Cardputer.Display.setTextSize(0.75);
   M5Cardputer.Display.println("Starting...");
-  M5Cardputer.Speaker.begin();
-  M5Cardputer.Speaker.setVolume(10);
-  M5Cardputer.Speaker.tone(1000, 100);
   spi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
 
-  if (!SD.begin(SD_CS, spi, 4000000)) {
+  if (!SD.begin(SD_CS, spi)) {
 	  M5Cardputer.Display.println("[-] SD Card Mount Failed");
 	  return;
   }
 
-  M5Cardputer.Display.println("[+] SD Card initialized.");
-  //M5 boiler
-  
+  M5Cardputer.Display.println("[+] SD Card initialized.");  
 
   //wifi setup
   WiFi.mode(WIFI_STA);

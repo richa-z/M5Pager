@@ -4,8 +4,10 @@
 #include <ArduinoJson.h>
 #include <String.h>
 #include <cstring>
+#include <WiFi.h>
 
 #include "menus.h"
+#include "enums/add_contact_type.h"
 
 extern MenuState currentMenu;
 extern int contactsSize;
@@ -72,9 +74,10 @@ const char* drawContacts(DynamicJsonDocument& contacts, int selectedIdx = 0) {
 
     contactsSize = contactCount;
 
-    // Draw '+ Add Contact...' as selectable
+    //Moznost pridania kontaktu
     if (selectedIdx == contactCount) {
         M5Cardputer.Display.setTextColor(BLACK, WHITE);
+        temp = "ADD_CONTACT_BTN";
     } else {
         M5Cardputer.Display.setTextColor(WHITE, BLACK);
     }
@@ -139,6 +142,8 @@ void drawSettings(int selectedIdx = 0) {
 
             M5Cardputer.Display.println(String("Username: " + String(user)).c_str());
             
+        } else if (strcmp(settingsItems[i], "MAC: ") == 0) {
+            M5Cardputer.Display.println(settingsItems[i] + WiFi.macAddress());
         } else {
             M5Cardputer.Display.println(settingsItems[i]);
         }
@@ -158,5 +163,21 @@ void changeUsername(String newUsername) {
     M5Cardputer.Display.println(changeUserLabel);
     M5Cardputer.Display.setCursor(M5Cardputer.Display.width() / 2 - newUsername.length() * 2.5, M5Cardputer.Display.height() / 2 + 16);
     M5Cardputer.Display.println(newUsername);
+}
+
+bool appendMessage(DynamicJsonDocument& contacts, const String& contactKey, const char* direction, const char* text) {
+    if (!contacts.containsKey(contactKey)) return false;
+
+    JsonObject contact = contacts[contactKey];
+    if (!contact.containsKey("messages")) {
+        contact.createNestedArray("messages");
+    }
+
+    JsonArray messages = contact["messages"].as<JsonArray>();
+    JsonObject msg = messages.createNestedObject();
+    msg["type"] = direction;
+    msg["text"] = text;
+
+    return saveContacts(contacts, "/m5pager/contacts.json");
 }
 

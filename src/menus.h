@@ -1,12 +1,13 @@
 #pragma once
 
-//Used for menu navigation states -> so input isnt dumb and can be expanded later
+//used for menu navigation states -> so input isnt dumb and can be expanded later
 enum MenuState {
     MENU_MAIN,
     MENU_CONTACTS,
     MENU_MESSAGE,
     MENU_SETTINGS,
-    MENU_CHANGE_USERNAME
+    MENU_CHANGE_USERNAME,
+    MENU_ADD_CONTACT
 };
 
 

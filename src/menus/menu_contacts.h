@@ -12,19 +12,28 @@ void drawContactsMenu() {
 }
 
 void handleContactsMenuInput(int key) {
-    //TODO: Implement contact menu input handling here
+    
     if (key == KEY_BACKSPACE) {
         currentMenu = MENU_MAIN;
-    } else if (key == ';') {
-        menuIndex = (menuIndex - 1 + mainMenuSize) % mainMenuSize;
+        return;
+    }
+
+    int totalItems = contactsSize + 1;
+    
+    if (key == ';') {
+        menuIndex = (menuIndex - 1 + totalItems) % totalItems;
         drawContactsMenu();
     } else if (key == '.') {
-        menuIndex = (menuIndex + 1) % mainMenuSize;
+        menuIndex = (menuIndex + 1) % totalItems;
         drawContactsMenu();
     }
     else if (key == KEY_ENTER) {
-        if (selectedContact != nullptr) {
+        if (selectedContact == nullptr)  return;
+
+        if (strcmp(selectedContact, "ADD_CONTACT_BTN") != 0) {
             currentMenu = MENU_MESSAGE;
+        } else {
+            currentMenu = MENU_ADD_CONTACT; 
         }
     }
 }
