@@ -29,10 +29,9 @@ void handleChangeUsernameInput(int key) {
         drawChangeUsername();
     } else if (key == KEY_ENTER) {
         if (newUsername.length() == 0) {
-            //do nothing
             return;
         }
-        //save new username to config
+
         config["username"] = newUsername.c_str();
         if (!saveConfig(config, "/m5pager/config.json")) {
             M5Cardputer.Display.println("[-] Failed to save config.");
@@ -48,6 +47,4 @@ void handleChangeUsernameInput(int key) {
         newUsername += (char)key;
         drawChangeUsername();
     } 
-
-    
 }

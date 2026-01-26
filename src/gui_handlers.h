@@ -20,6 +20,7 @@ const char* settingsItems[] = {
 };
 
 extern const char* user;
+extern int messageScroll;
 
 void drawSeparator() {
     int count = M5Cardputer.Display.width() / 6; // ~6px per char with small font
@@ -101,12 +102,18 @@ void drawMessages(DynamicJsonDocument& contactsJson, const char* selectedContact
 
         // Display messages for the selected contact
         if (contactsJson.containsKey(selectedContact)) {
-            JsonArray messages = contactsJson[selectedContact]["messages"].as<JsonArray>();
-            for (JsonVariant msg : messages) {
-                const char* type = msg["type"] == "in" ? person.c_str() : user;
-                const char* text = msg["text"];
-                String formattedLine = "[" + String(type) + "] " + String(text);
-                M5Cardputer.Display.println(formattedLine);
+            int maxLines = (M5Cardputer.Display.height() / 12) - 4;
+
+            JsonArray messages = contactsJson[selectedContact]["messages"];
+            int total = messages.size();
+
+            int start = max(0, total - maxLines - messageScroll);
+            int end   = total - messageScroll;
+
+            for (int i = start; i < end; i++) {
+                JsonObject msg = messages[i];
+                const char* who = msg["type"] == "in" ? person.c_str() : user;
+                M5Cardputer.Display.println("[" + String(who) + "] " + msg["text"].as<String>());
             }
         } else {
             M5Cardputer.Display.println("No messages.");

@@ -65,24 +65,7 @@ const char* selectedContact = nullptr;
 
 bool isAP = false;
 
-typedef struct MessageStruct {
-  PacketType type;
-  uint8_t from[6];
 
-  uint16_t message_id;
-  uint8_t split_size;
-  uint8_t split_index;
-
-  uint8_t data_len;
-  char msg[MSG_CHUNK_SIZE];
-} MessageStruct;
-
-typedef struct IncomingAssembly {
-    uint16_t message_id;
-    uint8_t expected_parts;
-    bool received[32];
-    String data;
-} IncomingAssembly;
 
 MessageStruct msgIncoming;
 MessageStruct msgOutgoing;
@@ -101,38 +84,19 @@ bool messageSentFlag = false;
 
 const char* user = "User";
 String editContactName = "";
+String messageInput = "";
+bool isTypingMsg = false;
+
+bool awaitingAck = false;
+uint16_t awaitingMsgId = 0;
+unsigned long sendTimestamp = 0;
+int messageScroll = 0;
 
 /*
 
 NETWORKING
 
 */
-
-void sendSplitMessage(const uint8_t* targetMac, const String& text) {
-    static uint16_t messageCounter = 0;
-    messageCounter++;
-
-    uint16_t msgId = messageCounter;
-    int totalLen = text.length();
-    uint8_t totalParts = (totalLen + MSG_CHUNK_SIZE - 1) / MSG_CHUNK_SIZE;
-
-    for (uint8_t i = 0; i < totalParts; i++) {
-        MessageStruct pkt{};
-        pkt.type = P_MSG;
-        esp_read_mac(pkt.from, ESP_MAC_WIFI_STA);
-
-        pkt.message_id = msgId;
-        pkt.split_size = totalParts;
-        pkt.split_index = i;
-
-        int offset = i * MSG_CHUNK_SIZE;
-        pkt.data_len = min(MSG_CHUNK_SIZE, totalLen - offset);
-        memcpy(pkt.msg, text.c_str() + offset, pkt.data_len);
-
-        esp_now_send(targetMac, (uint8_t*)&pkt, sizeof(MessageStruct) - MSG_CHUNK_SIZE + pkt.data_len);
-        delay(10); // brief delay to avoid overwhelming the receiver
-    }
-}
 
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
     Serial.print("[+] Last Packet Send Status: ");
@@ -144,6 +108,13 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
 
     MessageStruct pkt;
     memcpy(&pkt, data, data_len);
+
+    if (pkt.type == P_MSG_ACK) {
+        if (awaitingAck && pkt.message_id == awaitingMsgId) {
+            awaitingAck = false;
+        }
+        return;
+    }
 
     if (pkt.type != P_MSG) return;
 
@@ -180,7 +151,18 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
             drawMessageMenu();
         }
     }
+
+    MessageStruct ack{};
+    ack.type = P_MSG_ACK;
+    ack.message_id = pkt.message_id;
+    esp_now_send(mac_addr, (uint8_t*)&ack, sizeof(MessageStruct) - MSG_CHUNK_SIZE);
 }
+
+/*
+
+BASE
+
+*/
 
 void setup() {
   auto cfg = M5.config();
@@ -298,7 +280,7 @@ void loop() {
     }
 
 
-  //up and down are ; and . respecively, handled in the loop above
+  //up and down are ; and . respectively, handled in the loop above
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) key = KEY_ENTER; //SELECT
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) key = KEY_BACKSPACE; //BACK
 
@@ -306,6 +288,13 @@ void loop() {
       menus[currentMenu].handleInput(key);
       delay(150);
   }
+
+    if (awaitingAck && millis() - sendTimestamp > ACK_TIMEOUT) {
+        awaitingAck = false;
+        M5Cardputer.Display.setTextColor(RED, BLACK);
+        M5Cardputer.Display.println("[-] Message failed to send");
+        delay(800);
+    }
 
   if (currentMenu != previousMenu) {
       M5Cardputer.Display.fillScreen(0);

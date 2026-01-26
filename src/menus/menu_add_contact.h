@@ -47,13 +47,13 @@ void drawAddContact() {
             M5Cardputer.Display.println("MAC:  " + newContactMac);
             M5Cardputer.Display.println("");
             M5Cardputer.Display.println("[ENTER] Save");
-            M5Cardputer.Display.println("[BKSP] Cancel");
+            M5Cardputer.Display.println("[ESC] Back");
             break;
     }
 }
 
 void handleAddContactInput(int key) {
-bool changed = false;
+    bool changed = false;
 
     if (key == '`') {
         if (addStep == ADD_NAME) {
@@ -90,7 +90,7 @@ bool changed = false;
     }
 
     if (addStep == ADD_NAME) {
-        changed = handleTextInput(key, newContactName, 16);
+        changed = handleTextInput(key, newContactName, 20);
     } else if (addStep == ADD_MAC) {
         changed = handleTextInput(key, newContactMac, 17); //XX:XX:XX:XX:XX:XX
     }
