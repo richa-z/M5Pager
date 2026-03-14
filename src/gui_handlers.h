@@ -93,9 +93,8 @@ void drawMessages(DynamicJsonDocument& contactsJson, const char* selectedContact
     M5Cardputer.Display.setTextSize(1);
     M5Cardputer.Display.setTextFont(2);
 
-    String person = String(contactsJson[selectedContact]["username"].as<const char*>());
-
     if (selectedContact != nullptr) {
+        String person = String(contactsJson[selectedContact]["username"].as<const char*>());
         M5Cardputer.Display.setTextColor(WHITE, BLACK);
         M5Cardputer.Display.println(person);
         drawSeparator();
@@ -123,6 +122,16 @@ void drawMessages(DynamicJsonDocument& contactsJson, const char* selectedContact
         M5Cardputer.Display.println("No contact selected.");
         currentMenu = MENU_CONTACTS;
     }
+}
+
+String findContactKeyByMac(DynamicJsonDocument& contacts, const String& mac) {
+    for (JsonPair kvp : contacts.as<JsonObject>()) {
+        String key = kvp.key().c_str();
+        if (key.equalsIgnoreCase(mac)) {
+            return key;
+        }
+    }
+    return "";
 }
 
 void drawSettings(int selectedIdx = 0) {

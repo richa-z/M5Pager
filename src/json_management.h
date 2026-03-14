@@ -18,7 +18,8 @@ bool loadContacts(DynamicJsonDocument &contacts, const char* filename) {
             file.print("{}");
             file.close();
         }
-        return false;
+        contacts.clear();
+        return true;
     }
     M5Cardputer.Display.println("[*] Contacts file found. Reading...");
 
@@ -46,6 +47,11 @@ bool loadContacts(DynamicJsonDocument &contacts, const char* filename) {
 
 
 bool saveContacts(const DynamicJsonDocument &contacts, const char* filename) {
+    if (fileExists(filename) && !SD.remove(filename)) {
+        M5Cardputer.Display.println("[-] Failed to replace contacts file.");
+        return false;
+    }
+
     File file = SD.open(filename, FILE_WRITE);
     if (!file) {
         M5Cardputer.Display.println("[-] Failed to open contacts file for writing.");
@@ -74,13 +80,8 @@ bool loadConfig(DynamicJsonDocument &config, const char* filename) {
             file.print("{\"username\":\"User\"}");
             file.close();
         }
-
-        DeserializationError error = deserializeJson(config, file);
-        if (error) {
-            M5Cardputer.Display.print("[-] JSON parse error: ");
-            M5Cardputer.Display.println(error.c_str());
-            return false;
-        }
+        config.clear();
+        config["username"] = "User";
         return true;
     }
     M5Cardputer.Display.println("[*] Config file found. Reading...");
@@ -108,6 +109,11 @@ bool loadConfig(DynamicJsonDocument &config, const char* filename) {
 }
 
 bool saveConfig(const DynamicJsonDocument &config, const char* filename) {
+    if (fileExists(filename) && !SD.remove(filename)) {
+        M5Cardputer.Display.println("[-] Failed to replace config file.");
+        return false;
+    }
+
     File file = SD.open(filename, FILE_WRITE);
     if (!file) {
         M5Cardputer.Display.println("[-] Failed to open config file for writing.");

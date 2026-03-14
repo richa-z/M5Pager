@@ -1,6 +1,7 @@
 #pragma once
 
 #include <M5Cardputer.h>
+#include <esp_now.h>
 #include "menus.h"
 #include "gui_handlers.h"
 #include "util/text_input.h"
@@ -21,9 +22,13 @@ extern uint8_t selectedMac[6];
 extern bool awaitingAck;
 extern uint16_t awaitingMsgId;
 extern unsigned long sendTimestamp;
+bool selectContactPeer(const char* contactMac);
 
 uint16_t sendSplitMessage(const uint8_t* targetMac, const String& text) {
     static uint16_t messageCounter = 0;
+    if (targetMac == nullptr || text.length() == 0) return 0;
+    if (!esp_now_is_peer_exist(targetMac)) return 0;
+
     messageCounter++;
 
     uint16_t msgId = messageCounter;
@@ -43,7 +48,10 @@ uint16_t sendSplitMessage(const uint8_t* targetMac, const String& text) {
         pkt.data_len = min(MSG_CHUNK_SIZE, totalLen - offset);
         memcpy(pkt.msg, text.c_str() + offset, pkt.data_len);
 
-        esp_now_send(targetMac, (uint8_t*)&pkt, sizeof(MessageStruct) - MSG_CHUNK_SIZE + pkt.data_len);
+        esp_err_t sendResult = esp_now_send(targetMac, (uint8_t*)&pkt, sizeof(MessageStruct) - MSG_CHUNK_SIZE + pkt.data_len);
+        if (sendResult != ESP_OK) {
+            return 0;
+        }
         delay(10);
     }
 
@@ -97,8 +105,26 @@ void handleMessageInput(int key) {
         if (key == KEY_ENTER) {
             if (messageInput.length() == 0) return;
 
-            appendMessage(contacts, selectedContact, "out", messageInput.c_str());
+            if (!selectContactPeer(selectedContact)) {
+                M5Cardputer.Display.setTextColor(RED, BLACK);
+                M5Cardputer.Display.println("[-] Invalid peer MAC");
+                delay(800);
+                isTypingMsg = false;
+                drawMessageMenu();
+                return;
+            }
+
             uint16_t msgId = sendSplitMessage(selectedMac, messageInput);
+            if (msgId == 0) {
+                M5Cardputer.Display.setTextColor(RED, BLACK);
+                M5Cardputer.Display.println("[-] Send failed");
+                delay(800);
+                isTypingMsg = false;
+                drawMessageMenu();
+                return;
+            }
+
+            appendMessage(contacts, selectedContact, "out", messageInput.c_str());
 
             awaitingAck = true;
             awaitingMsgId = msgId;

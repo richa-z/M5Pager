@@ -72,8 +72,6 @@ MessageStruct msgOutgoing;
 
 IncomingAssembly assembly{};
 
-esp_now_peer_info_t peerInfo;
-
 SPIClass spi = SPIClass(FSPI);
 DynamicJsonDocument contacts(8192);
 DynamicJsonDocument config(1024);
@@ -98,15 +96,36 @@ NETWORKING
 
 */
 
+bool addOrRefreshPeer(const uint8_t* peerMac) {
+    if (peerMac == nullptr) return false;
+    if (esp_now_is_peer_exist(peerMac)) return true;
+
+    esp_now_peer_info_t peer{};
+    memcpy(peer.peer_addr, peerMac, 6);
+    peer.channel = 0;
+    peer.encrypt = false;
+
+    return esp_now_add_peer(&peer) == ESP_OK;
+}
+
+bool selectContactPeer(const char* contactMac) {
+    uint8_t parsedMac[6];
+    if (!parseMacAddress(contactMac, parsedMac)) return false;
+
+    memcpy(selectedMac, parsedMac, sizeof(selectedMac));
+    return addOrRefreshPeer(selectedMac);
+}
+
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
     Serial.print("[+] Last Packet Send Status: ");
     M5Cardputer.Display.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
 }
 
 void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
-    if (data_len < sizeof(MessageStruct) - MSG_CHUNK_SIZE) return;
+    const int headerSize = sizeof(MessageStruct) - MSG_CHUNK_SIZE;
+    if (data_len < headerSize || data_len > static_cast<int>(sizeof(MessageStruct))) return;
 
-    MessageStruct pkt;
+    MessageStruct pkt{};
     memcpy(&pkt, data, data_len);
 
     if (pkt.type == P_MSG_ACK) {
@@ -117,6 +136,12 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     }
 
     if (pkt.type != P_MSG) return;
+    if (pkt.split_size == 0 || pkt.split_size > 32) return;
+    if (pkt.split_index >= pkt.split_size) return;
+    if (pkt.split_index >= 32) return;
+
+    int payloadLen = data_len - headerSize;
+    if (pkt.data_len > payloadLen || pkt.data_len > MSG_CHUNK_SIZE) return;
 
     if (pkt.split_index == 0) {
         assembly = {};
@@ -126,11 +151,12 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     }
 
     if (pkt.message_id != assembly.message_id) return;
-    if (pkt.split_index >= 32) return;
 
     if (!assembly.received[pkt.split_index]) {
         assembly.received[pkt.split_index] = true;
-        assembly.data += String(pkt.msg).substring(0, pkt.data_len);
+        for (uint8_t i = 0; i < pkt.data_len; i++) {
+            assembly.data += pkt.msg[i];
+        }
     }
 
     bool complete = true;
@@ -143,15 +169,19 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
 
     if (complete) {
         String senderMac = macToString(mac_addr);
-        appendMessage(contacts, senderMac, "in", assembly.data.c_str());
+        String contactKey = findContactKeyByMac(contacts, senderMac);
+        if (contactKey.length() > 0) {
+            appendMessage(contacts, contactKey, "in", assembly.data.c_str());
+        }
 
         if (currentMenu == MENU_MESSAGE &&
             selectedContact &&
-            senderMac == selectedContact) {
+            senderMac.equalsIgnoreCase(selectedContact)) {
             drawMessageMenu();
         }
     }
 
+    addOrRefreshPeer(mac_addr);
     MessageStruct ack{};
     ack.type = P_MSG_ACK;
     ack.message_id = pkt.message_id;
@@ -180,7 +210,7 @@ void setup() {
   M5Cardputer.Display.println("[+] SD Card initialized.");  
 
   //wifi setup
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
   WiFi.disconnect();
   
 
@@ -188,6 +218,15 @@ void setup() {
   if (ScanAP(ssid)) {
     M5Cardputer.Display.println("[+] Network exists. Connecting.");
     WiFi.begin(ssid, password);
+    unsigned long connectStart = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - connectStart < 5000) {
+      delay(100);
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+      M5Cardputer.Display.println("[!] Connect timeout. Creating AP.");
+      WiFi.softAP(ssid, password);
+      isAP = true;
+    }
   } else {
     M5Cardputer.Display.println("[+] Network not found. Creating.");
     WiFi.softAP(ssid, password);
@@ -205,32 +244,7 @@ void setup() {
 
   esp_now_register_send_cb(onDataSent);
   esp_now_register_recv_cb(onDataRecv);
-
-  //do not connect to null mac
-  bool macEmptyFlag = true;
-  for (int i = 0; i < 6; i++) {
-      if (selectedMac[i] != 0x00) {
-          macEmptyFlag = false;
-          break;
-      }
-  }
-
-  if (!macEmptyFlag) {
-    memcpy(peerInfo.peer_addr, selectedMac, 6);
-    peerInfo.channel = 0;  
-    peerInfo.encrypt = false;
-
-    if (esp_now_add_peer(&peerInfo) != ESP_OK){
-      M5Cardputer.Display.println("[-] Failed to add peer");
-      return;
-    }
-
-    M5Cardputer.Display.println("[+] Peer added: " + String(selectedMac[0], HEX) + ":" + String(selectedMac[1], HEX) + ":" + String(selectedMac[2], HEX) + ":" + String(selectedMac[3], HEX) + ":" + String(selectedMac[4], HEX) + ":" + String(selectedMac[5], HEX));
-    M5Cardputer.Display.println("[+] ESP-NOW setup complete.");
-  } else {
-    M5Cardputer.Display.println("[!] No peer selected. Skipping ESP-NOW peer add.");
-    M5Cardputer.Display.println("[!] ESP-NOW setup incomplete.");
-  }
+  M5Cardputer.Display.println("[+] ESP-NOW setup complete.");
 
   if (!loadContacts(contacts, "/m5pager/contacts.json")) {
       M5Cardputer.Display.println("[-] Failed to load contacts.");
@@ -252,7 +266,7 @@ void setup() {
   M5Cardputer.Display.setTextSize(1);
 
   //typewriter effect for nice welcome message :3
-  user = config["username"];
+  user = config["username"] | "User";
   String welcomeMsg = "Welcome back, " + String(user) + "!\n";
   M5Cardputer.Display.setCursor(M5Cardputer.Display.width() / 2 - welcomeMsg.length() * 3, M5Cardputer.Display.height() / 2 - 4);
   for (size_t i = 0; i < welcomeMsg.length(); i++) {

@@ -9,6 +9,8 @@
 #include <ArduinoJson.h>
 
 #include "util/text_input.h"
+#include "util/network_util.h"
+#include "util/util.h"
 
 extern MenuState currentMenu;
 extern DynamicJsonDocument contacts;
@@ -66,13 +68,56 @@ void handleAddContactInput(int key) {
     }
 
     if (key == KEY_ENTER) {
-        if (addStep == ADD_CONFIRM) {
-            JsonObject obj = contacts.createNestedObject(newContactMac);
-            obj["username"] = newContactName;
-            obj.createNestedArray("messages");
+        if (addStep == ADD_NAME) {
+            if (newContactName.length() == 0) return;
+            addStep = ADD_MAC;
+            drawAddContact();
+            return;
+        }
 
-            JsonObject keys = obj.createNestedObject("keys");
-            keys["status"] = "none";
+        if (addStep == ADD_MAC) {
+            uint8_t parsedMac[6];
+            if (!parseMacAddress(newContactMac.c_str(), parsedMac)) {
+                M5Cardputer.Display.setTextColor(RED, BLACK);
+                M5Cardputer.Display.println("[-] Invalid MAC format");
+                delay(800);
+                drawAddContact();
+                return;
+            }
+
+            newContactMac = macToString(parsedMac);
+            addStep = ADD_CONFIRM;
+            drawAddContact();
+            return;
+        }
+
+        if (addStep == ADD_CONFIRM) {
+            String keyMac = findContactKeyByMac(contacts, newContactMac);
+            if (keyMac.length() == 0) {
+                keyMac = newContactMac;
+            }
+
+            JsonObject obj;
+            if (contacts.containsKey(keyMac.c_str())) {
+                obj = contacts[keyMac.c_str()];
+            } else {
+                obj = contacts.createNestedObject(keyMac.c_str());
+            }
+
+            obj["username"] = newContactName;
+            if (!obj.containsKey("messages")) {
+                obj.createNestedArray("messages");
+            }
+
+            JsonObject keys;
+            if (obj.containsKey("keys")) {
+                keys = obj["keys"].as<JsonObject>();
+            } else {
+                keys = obj.createNestedObject("keys");
+            }
+            if (!keys.containsKey("status")) {
+                keys["status"] = "none";
+            }
 
             saveContacts(contacts, "/m5pager/contacts.json");
 
@@ -83,10 +128,6 @@ void handleAddContactInput(int key) {
             currentMenu = MENU_CONTACTS;
             return;
         }
-
-        addStep = (AddContactStep)(addStep + 1);
-        drawAddContact();
-        return;
     }
 
     if (addStep == ADD_NAME) {

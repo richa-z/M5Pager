@@ -1,3 +1,5 @@
+#pragma once
+
 #include <SD.h>
 
 bool fileExists(const char* path) {

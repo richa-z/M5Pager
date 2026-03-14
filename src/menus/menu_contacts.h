@@ -6,6 +6,7 @@
 extern DynamicJsonDocument contacts;
 extern int menuIndex;
 extern const char* selectedContact;
+bool selectContactPeer(const char* contactMac);
 
 void drawContactsMenu() {
     selectedContact = drawContacts(contacts, menuIndex);
@@ -31,6 +32,16 @@ void handleContactsMenuInput(int key) {
         if (selectedContact == nullptr)  return;
 
         if (strcmp(selectedContact, "ADD_CONTACT_BTN") != 0) {
+            if (!selectContactPeer(selectedContact)) {
+                M5Cardputer.Display.fillScreen(BLACK);
+                M5Cardputer.Display.setCursor(0, 0);
+                M5Cardputer.Display.setTextColor(RED, BLACK);
+                M5Cardputer.Display.println("[-] Invalid contact MAC");
+                delay(800);
+                drawContactsMenu();
+                return;
+            }
+            messageScroll = 0;
             currentMenu = MENU_MESSAGE;
         } else {
             currentMenu = MENU_ADD_CONTACT; 
