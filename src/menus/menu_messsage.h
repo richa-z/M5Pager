@@ -24,6 +24,46 @@ extern uint16_t awaitingMsgId;
 extern unsigned long sendTimestamp;
 bool selectContactPeer(const char* contactMac);
 
+String trimRightForWidth(const String& text, int maxChars) {
+    if (maxChars <= 0) return "";
+    if (text.length() <= static_cast<size_t>(maxChars)) return text;
+    if (maxChars <= 3) return text.substring(text.length() - maxChars);
+    return "..." + text.substring(text.length() - (maxChars - 3));
+}
+
+int getChatLineHeight() {
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.setTextFont(2);
+    int lineHeight = M5Cardputer.Display.fontHeight();
+    return max(10, lineHeight);
+}
+
+int getVisibleMessageLines() {
+    const int lineHeight = getChatLineHeight();
+    const int headerLines = 2;
+    const int footerLines = 2;
+    int headerPx = headerLines * lineHeight;
+    int footerPx = footerLines * lineHeight;
+    int messagePx = M5Cardputer.Display.height() - headerPx - footerPx;
+    return max(1, messagePx / lineHeight);
+}
+
+int getMaxMessageScroll() {
+    if (selectedContact == nullptr) return 0;
+    if (!contacts.containsKey(selectedContact)) return 0;
+
+    JsonArray messages = contacts[selectedContact]["messages"];
+    int totalMessages = messages.size();
+    int visibleLines = getVisibleMessageLines();
+    return max(0, totalMessages - visibleLines);
+}
+
+void clampMessageScroll() {
+    if (messageScroll < 0) messageScroll = 0;
+    int maxScroll = getMaxMessageScroll();
+    if (messageScroll > maxScroll) messageScroll = maxScroll;
+}
+
 uint16_t sendSplitMessage(const uint8_t* targetMac, const String& text) {
     static uint16_t messageCounter = 0;
     if (targetMac == nullptr || text.length() == 0) return 0;
@@ -59,15 +99,51 @@ uint16_t sendSplitMessage(const uint8_t* targetMac, const String& text) {
 }
 
 void drawMessageMenu() {
-    drawMessages(contacts, selectedContact);
+    const int lineHeight = getChatLineHeight();
+    const int footerLines = 2;
+
+    M5Cardputer.Display.fillScreen(BLACK);
+    M5Cardputer.Display.setCursor(0, 0);
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.setTextFont(2);
+    M5Cardputer.Display.setTextColor(WHITE, BLACK);
+
+    if (selectedContact == nullptr || !contacts.containsKey(selectedContact)) {
+        M5Cardputer.Display.println("No contact selected.");
+        currentMenu = MENU_CONTACTS;
+        return;
+    }
+
+    int maxChars = max(1, M5Cardputer.Display.width() / 6);
+    String person = String(contacts[selectedContact]["username"].as<const char*>());
+    M5Cardputer.Display.println(trimRightForWidth(person, maxChars));
+    drawSeparator();
+
+    JsonArray messages = contacts[selectedContact]["messages"];
+    int totalMessages = messages.size();
+    int visibleLines = getVisibleMessageLines();
+    clampMessageScroll();
+
+    int start = max(0, totalMessages - visibleLines - messageScroll);
+    int end = min(totalMessages, start + visibleLines);
+
+    for (int i = start; i < end; i++) {
+        JsonObject msg = messages[i];
+        bool incoming = String(msg["type"].as<const char*>()) == "in";
+        const char* who = incoming ? person.c_str() : "You";
+        String line = "[" + String(who) + "] " + msg["text"].as<String>();
+        M5Cardputer.Display.println(trimRightForWidth(line, maxChars));
+    }
+
+    int footerY = M5Cardputer.Display.height() - (footerLines * lineHeight);
+    M5Cardputer.Display.setCursor(0, footerY);
+    drawSeparator();
 
     if (isTypingMsg) {
-        drawSeparator();
+        int inputChars = max(1, maxChars - 2);
         M5Cardputer.Display.print("> ");
-        M5Cardputer.Display.println(messageInput);
+        M5Cardputer.Display.println(trimRightForWidth(messageInput, inputChars));
     } else {
-        drawSeparator();
-        M5Cardputer.Display.println("");
         M5Cardputer.Display.println("[ENTER] Send message");
     }
 }
@@ -85,7 +161,10 @@ void handleMessageInput(int key) {
 
     if (!isTypingMsg) {
         if (key == ';') {        // UP
-            messageScroll++;
+            int maxScroll = getMaxMessageScroll();
+            if (messageScroll < maxScroll) {
+                messageScroll++;
+            }
             drawMessageMenu();
         } 
         if (key == '.') {        // DOWN

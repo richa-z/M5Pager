@@ -23,8 +23,12 @@ extern const char* user;
 extern int messageScroll;
 
 void drawSeparator() {
-    int count = M5Cardputer.Display.width() / 6; // ~6px per char with small font
+    M5Cardputer.Display.setTextColor(WHITE, BLACK);
+    int dashWidth = M5Cardputer.Display.textWidth("-");
+    if (dashWidth <= 0) dashWidth = 6;
+    int count = max(1, (M5Cardputer.Display.width() / dashWidth) - 1);
     String line = "";
+    line.reserve(count);
     for (int i = 0; i < count; i++) {
         line += '-';
     }
@@ -139,6 +143,10 @@ void drawSettings(int selectedIdx = 0) {
     M5Cardputer.Display.setCursor(0, 0);
     M5Cardputer.Display.setTextSize(1);
     M5Cardputer.Display.setTextFont(2);
+    M5Cardputer.Display.setTextColor(WHITE, BLACK);
+
+    M5Cardputer.Display.println("Settings");
+    drawSeparator();
 
     for (size_t i = 0; i < 2; i++) {
         if (i == selectedIdx) {
