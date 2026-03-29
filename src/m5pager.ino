@@ -11,6 +11,7 @@
 #include "util/network_util.h"
 #include "json_management.h"
 #include "gui_handlers.h"
+#include "security/device_key_store.h"
 
 #include "enums/packet_types.h"
 
@@ -200,6 +201,20 @@ void setup() {
   M5Cardputer.Display.setTextFont(2);
   M5Cardputer.Display.setTextSize(0.75);
   M5Cardputer.Display.println("Starting...");
+
+  DeviceKeyProvisionState keyState = Security::ensureDevicePrivateKey();
+  if (keyState == DeviceKeyProvisionState::Error) {
+      M5Cardputer.Display.println("[-] FATAL: Key provisioning failed.");
+      return;
+  }
+
+  if (keyState == DeviceKeyProvisionState::CreatedNew) {
+      M5Cardputer.Display.println("[+] Device private key provisioned.");
+  } else {
+      M5Cardputer.Display.println("[+] Device private key loaded.");
+  }
+  M5Cardputer.Display.println("[*] Key ID: " + Security::getDeviceKeyFingerprint());
+
   spi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
 
   if (!SD.begin(SD_CS, spi)) {
