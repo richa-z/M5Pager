@@ -5,6 +5,7 @@
 #include <String.h>
 #include <cstring>
 #include <WiFi.h>
+#include <time.h>
 
 #include "menus.h"
 #include "enums/add_contact_type.h"
@@ -22,6 +23,117 @@ const char* settingsItems[] = {
 extern const char* user;
 extern int messageScroll;
 
+constexpr int UI_TOPBAR_HEIGHT = 12;
+constexpr int UI_TOPBAR_TEXT_Y = 2;
+constexpr int UI_CONTENT_TOP_Y = UI_TOPBAR_HEIGHT + 2;
+
+inline String trimToPixelWidth(const String& text, int maxWidthPx) {
+    if (maxWidthPx <= 0) return "";
+    if (M5Cardputer.Display.textWidth(text) <= maxWidthPx) return text;
+
+    const String suffix = "...";
+    if (M5Cardputer.Display.textWidth(suffix) > maxWidthPx) return "";
+
+    String out = text;
+    while (out.length() > 0 && M5Cardputer.Display.textWidth(out + suffix) > maxWidthPx) {
+        out.remove(out.length() - 1);
+    }
+    return out + suffix;
+}
+
+inline String getTopbarTimeText() {
+    if (M5.Rtc.isEnabled()) {
+        m5::rtc_datetime_t dt;
+        if (M5.Rtc.getDateTime(&dt)) {
+            char buf[6];
+            snprintf(buf, sizeof(buf), "%02d:%02d", dt.time.hours, dt.time.minutes);
+            return String(buf);
+        }
+    }
+
+    time_t now = time(nullptr);
+    if (now > 100000) {
+        struct tm localTm {};
+        localtime_r(&now, &localTm);
+        char buf[6];
+        snprintf(buf, sizeof(buf), "%02d:%02d", localTm.tm_hour, localTm.tm_min);
+        return String(buf);
+    }
+
+    return "--:--";
+}
+
+inline String getTopbarUsernameText() {
+    const char* cfgUser = config["username"];
+    if (cfgUser != nullptr && cfgUser[0] != '\0') return String(cfgUser);
+    if (user != nullptr && user[0] != '\0') return String(user);
+    return "User";
+}
+
+inline String getTopbarBatteryText() {
+    int battery = M5Cardputer.Power.getBatteryLevel();
+    if (battery < 0) return "--%";
+    if (battery > 100) battery = 100;
+
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d%%", battery);
+    return String(buf);
+}
+
+inline void drawTopbar() {
+    const uint16_t barBg = M5Cardputer.Display.color565(18, 22, 30);
+    const uint16_t barFg = M5Cardputer.Display.color565(235, 240, 250);
+    const uint16_t barLine = M5Cardputer.Display.color565(70, 80, 95);
+
+    const int width = M5Cardputer.Display.width();
+    const int pad = 3;
+
+    M5Cardputer.Display.fillRect(0, 0, width, UI_TOPBAR_HEIGHT, barBg);
+    M5Cardputer.Display.drawFastHLine(0, UI_TOPBAR_HEIGHT - 1, width, barLine);
+
+    M5Cardputer.Display.setTextFont(1);
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.setTextColor(barFg, barBg);
+
+    String left = getTopbarTimeText();
+    String center = getTopbarUsernameText();
+    String right = getTopbarBatteryText();
+
+    int leftW = M5Cardputer.Display.textWidth(left);
+    int rightW = M5Cardputer.Display.textWidth(right);
+
+    int leftX = pad;
+    int rightX = max(pad, width - pad - rightW);
+
+    int middleLeft = leftX + leftW + 6;
+    int middleRight = rightX - 6;
+    int middleWidth = middleRight - middleLeft;
+    if (middleWidth < 0) middleWidth = 0;
+
+    center = trimToPixelWidth(center, middleWidth);
+    int centerW = M5Cardputer.Display.textWidth(center);
+    int centerX = middleLeft + max(0, (middleWidth - centerW) / 2);
+
+    M5Cardputer.Display.setCursor(leftX, UI_TOPBAR_TEXT_Y);
+    M5Cardputer.Display.print(left);
+
+    if (center.length() > 0) {
+        M5Cardputer.Display.setCursor(centerX, UI_TOPBAR_TEXT_Y);
+        M5Cardputer.Display.print(center);
+    }
+
+    M5Cardputer.Display.setCursor(rightX, UI_TOPBAR_TEXT_Y);
+    M5Cardputer.Display.print(right);
+}
+
+inline void beginScreenFrame() {
+    M5Cardputer.Display.fillScreen(BLACK);
+    drawTopbar();
+    M5Cardputer.Display.setCursor(0, UI_CONTENT_TOP_Y);
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.setTextFont(2);
+}
+
 void drawSeparator() {
     M5Cardputer.Display.setTextColor(WHITE, BLACK);
     int dashWidth = M5Cardputer.Display.textWidth("-");
@@ -36,10 +148,7 @@ void drawSeparator() {
 }
 
 inline void drawMenu(const char* items[], int itemCount, int selectedIdx = 0) {
-    M5Cardputer.Display.fillScreen(BLACK);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.setTextFont(2);
+    beginScreenFrame();
 
     for (size_t i = 0; i < itemCount; i++) {
         if (i == selectedIdx) {
@@ -52,10 +161,7 @@ inline void drawMenu(const char* items[], int itemCount, int selectedIdx = 0) {
 }
 
 const char* drawContacts(DynamicJsonDocument& contacts, int selectedIdx = 0) {
-    M5Cardputer.Display.fillScreen(BLACK);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.setTextFont(2);
+    beginScreenFrame();
 
     //names are main object keys
     int counter = 0;
@@ -92,10 +198,7 @@ const char* drawContacts(DynamicJsonDocument& contacts, int selectedIdx = 0) {
 }
 
 void drawMessages(DynamicJsonDocument& contactsJson, const char* selectedContact) {
-    M5Cardputer.Display.fillScreen(BLACK);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.setTextFont(2);
+    beginScreenFrame();
 
     if (selectedContact != nullptr) {
         String person = String(contactsJson[selectedContact]["username"].as<const char*>());
@@ -139,10 +242,7 @@ String findContactKeyByMac(DynamicJsonDocument& contacts, const String& mac) {
 }
 
 void drawSettings(int selectedIdx = 0) {
-    M5Cardputer.Display.fillScreen(BLACK);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.setTextFont(2);
+    beginScreenFrame();
     M5Cardputer.Display.setTextColor(WHITE, BLACK);
 
     M5Cardputer.Display.println("Settings");
@@ -176,10 +276,7 @@ void drawSettings(int selectedIdx = 0) {
 }
 
 void changeUsername(String newUsername) {
-    M5Cardputer.Display.fillScreen(BLACK);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.setTextFont(2);
+    beginScreenFrame();
 
     M5Cardputer.Display.setTextColor(WHITE, BLACK);
     String changeUserLabel = "Type your username below:";

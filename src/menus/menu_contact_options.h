@@ -20,10 +20,7 @@ const char* contactOptions[] = {
 constexpr int CONTACT_OPTIONS_SIZE = 3;
 
 void drawContactOptions() {
-    M5Cardputer.Display.fillScreen(BLACK);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextFont(2);
-    M5Cardputer.Display.setTextSize(1);
+    beginScreenFrame();
 
     M5Cardputer.Display.println("Contact Options");
     drawSeparator();

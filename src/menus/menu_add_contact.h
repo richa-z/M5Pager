@@ -22,10 +22,7 @@ extern String newContactMac  = "";
 extern AddContactStep addStep = ADD_NAME;
 
 void drawAddContact() {
-    M5Cardputer.Display.fillScreen(BLACK);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextFont(2);
-    M5Cardputer.Display.setTextSize(1);
+    beginScreenFrame();
     M5Cardputer.Display.setTextColor(WHITE, BLACK);
 
     M5Cardputer.Display.println("Add Contact");

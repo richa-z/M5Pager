@@ -44,7 +44,7 @@ int getVisibleMessageLines() {
     const int footerLines = 2;
     int headerPx = headerLines * lineHeight;
     int footerPx = footerLines * lineHeight;
-    int messagePx = M5Cardputer.Display.height() - headerPx - footerPx;
+    int messagePx = M5Cardputer.Display.height() - UI_CONTENT_TOP_Y - headerPx - footerPx;
     return max(1, messagePx / lineHeight);
 }
 
@@ -102,10 +102,7 @@ void drawMessageMenu() {
     const int lineHeight = getChatLineHeight();
     const int footerLines = 2;
 
-    M5Cardputer.Display.fillScreen(BLACK);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.setTextFont(2);
+    beginScreenFrame();
     M5Cardputer.Display.setTextColor(WHITE, BLACK);
 
     if (selectedContact == nullptr || !contacts.containsKey(selectedContact)) {
