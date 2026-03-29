@@ -200,6 +200,8 @@ void setup() {
   M5Cardputer.begin(cfg, true);
   M5Cardputer.Display.setTextFont(2);
   M5Cardputer.Display.setTextSize(0.75);
+  M5Cardputer.Display.setTextScroll(true);
+  M5Cardputer.Display.setCursor(0, 0);
   M5Cardputer.Display.println("Starting...");
 
   DeviceKeyProvisionState keyState = Security::ensureDevicePrivateKey();
@@ -276,6 +278,7 @@ void setup() {
   M5Cardputer.Display.println("[+] Setup complete.");
 
   delay(1000);
+  M5Cardputer.Display.setTextScroll(false);
   M5Cardputer.Display.fillScreen(0);
   M5Cardputer.Display.setCursor(0, 0);
   M5Cardputer.Display.setTextSize(1);
