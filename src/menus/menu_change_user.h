@@ -5,6 +5,7 @@
 #include <M5Cardputer.h>
 #include <ArduinoJson.h>
 #include <json_management.h>
+#include "util/text_input.h"
 
 extern MenuState currentMenu;
 extern DynamicJsonDocument config;
@@ -22,11 +23,6 @@ void handleChangeUsernameInput(int key) {
         newUsername = "";
         currentMenu = MENU_SETTINGS;
         return;
-    } else if (key == KEY_BACKSPACE) {
-        if (newUsername.length() > 0) {
-            newUsername.remove(newUsername.length() - 1);
-        }
-        drawChangeUsername();
     } else if (key == KEY_ENTER) {
         if (newUsername.length() == 0) {
             return;
@@ -34,17 +30,21 @@ void handleChangeUsernameInput(int key) {
 
         config["username"] = newUsername.c_str();
         if (!saveConfig(config, "/m5pager/config.json")) {
-            M5Cardputer.Display.println("[-] Failed to save config.");
+            drawChangeUsername();
+            showErrorToast("Failed to save config");
+            return;
         } else {
-            M5Cardputer.Display.println("[+] Config saved.");
+            drawChangeUsername();
+            showSuccessToast("Username saved", 700);
         }
         menuIndex = 0;
         user = newUsername.c_str();
         newUsername = "";
         currentMenu = MENU_SETTINGS;
         return;
-    } else if (newUsername.length() < 20) { 
-        newUsername += (char)key;
+    }
+
+    if (handleTextInput(key, newUsername, 20)) {
         drawChangeUsername();
-    } 
+    }
 }

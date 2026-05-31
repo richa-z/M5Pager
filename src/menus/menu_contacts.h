@@ -33,11 +33,8 @@ void handleContactsMenuInput(int key) {
 
         if (strcmp(selectedContact, "ADD_CONTACT_BTN") != 0) {
             if (!selectContactPeer(selectedContact)) {
-                M5Cardputer.Display.fillScreen(BLACK);
-                M5Cardputer.Display.setCursor(0, 0);
-                M5Cardputer.Display.setTextColor(RED, BLACK);
-                M5Cardputer.Display.println("[-] Invalid contact MAC");
-                delay(800);
+                drawContactsMenu();
+                showErrorToast("Invalid contact MAC");
                 drawContactsMenu();
                 return;
             }

@@ -27,12 +27,11 @@ void handleSettingsMenuInput(int key) {
         drawSettingsMenu();
     } else if (key == KEY_ENTER) {
         switch (menuIndex) {
-            case 0: //change username
+            case 0: //zmena username
                 menuIndex = 0;
                 currentMenu = MENU_CHANGE_USERNAME;
                 break;
-            case 1: //mac address, read-only
-                //do nothing
+            case 1: //mac adresa - read-only, takže žiadna akcia
                 break;
         }
     }

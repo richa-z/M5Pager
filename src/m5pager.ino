@@ -12,6 +12,7 @@
 #include "json_management.h"
 #include "gui_handlers.h"
 #include "security/device_key_store.h"
+#include "security/message_crypto.h"
 
 #include "enums/packet_types.h"
 
@@ -58,6 +59,7 @@ MenuHandler menus[] = {
   {drawEditContact, handleEditContactInput}
 };
 
+//Comm login -> TODO: do nastaveni
 const char* ssid PROGMEM = "PAGER_COM";
 const char* password PROGMEM = "sd65fd4Fd4_dKAIu::?_a5df4sd";
 
@@ -65,8 +67,6 @@ uint8_t selectedMac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 const char* selectedContact = nullptr;
 
 bool isAP = false;
-
-
 
 MessageStruct msgIncoming;
 MessageStruct msgOutgoing;
@@ -81,7 +81,7 @@ char inputBuffer[MSG_CHUNK_SIZE];
 int bytesRead;
 bool messageSentFlag = false;
 
-const char* user = "User";
+const char* user = "User"; //username, nacitane/menene z configu, default "User"
 String editContactName = "";
 String messageInput = "";
 bool isTypingMsg = false;
@@ -89,6 +89,9 @@ bool isTypingMsg = false;
 bool awaitingAck = false;
 uint16_t awaitingMsgId = 0;
 unsigned long sendTimestamp = 0;
+bool pendingOutgoingReady = false;
+String pendingOutgoingContact = "";
+String pendingOutgoingText = "";
 int messageScroll = 0;
 
 /*
@@ -97,6 +100,9 @@ NETWORKING
 
 */
 
+/// @brief Pridá peer do ESP-NOW, ak nie je pridaný.
+/// @param peerMac Peer MAC adresa
+/// @return TRUE ak bol peer pridaný/existuje, FALSE pri chybe
 bool addOrRefreshPeer(const uint8_t* peerMac) {
     if (peerMac == nullptr) return false;
     if (esp_now_is_peer_exist(peerMac)) return true;
@@ -109,6 +115,9 @@ bool addOrRefreshPeer(const uint8_t* peerMac) {
     return esp_now_add_peer(&peer) == ESP_OK;
 }
 
+/// @brief  Vyberie kontakt na základe MAC adresy a nastaví ho ako aktuálny peer pre komunikáciu. Ak peer neexistuje, pokúsi se ho pridať.
+/// @param contactMac MAC adresa kontaktu
+/// @return TRUE ak bol peer vybraný, FALSE pri chybe
 bool selectContactPeer(const char* contactMac) {
     uint8_t parsedMac[6];
     if (!parseMacAddress(contactMac, parsedMac)) return false;
@@ -117,11 +126,149 @@ bool selectContactPeer(const char* contactMac) {
     return addOrRefreshPeer(selectedMac);
 }
 
-void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-    Serial.print("[+] Last Packet Send Status: ");
-    M5Cardputer.Display.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+/// @brief Vráti nasledujúce ID pre kontrolné správy. Kontrolné správy sú tie, ktoré nie sú rozdelené na viacero paketov (napr. ACK, výmena kľúčov).
+/// @return Nasledujúce ID pre kontrolné správy
+uint16_t nextControlMessageId() {
+    static uint16_t controlMessageCounter = 40000;
+    return ++controlMessageCounter;
 }
 
+/// @brief Prevedie payload paketu na string.
+/// @param pkt Paket
+/// @return String obsahující payload paketu
+String packetPayloadToString(const MessageStruct& pkt) {
+    String payload;
+    payload.reserve(pkt.data_len);
+    for (uint8_t i = 0; i < pkt.data_len; i++) {
+        payload += pkt.msg[i];
+    }
+    return payload;
+}
+
+/// @brief Odošle jednotlivý paket cez ESP-NOW.
+/// @param type Typ paketu
+/// @param targetMac MAC adresa cieľa
+/// @param payload Payload paketu
+/// @param messageId ID správy
+/// @return TRUE ak bol paket odoslaný, FALSE pri chybe
+bool sendSinglePacket(PacketType type, const uint8_t* targetMac, const String& payload, uint16_t messageId = 0) {
+    if (targetMac == nullptr || payload.length() > MSG_CHUNK_SIZE) return false;
+    if (!esp_now_is_peer_exist(targetMac) && !addOrRefreshPeer(targetMac)) return false;
+
+    MessageStruct pkt{};
+    pkt.type = type;
+    esp_read_mac(pkt.from, ESP_MAC_WIFI_STA);
+    pkt.message_id = messageId == 0 ? nextControlMessageId() : messageId;
+    pkt.split_size = 1;
+    pkt.split_index = 0;
+    pkt.data_len = payload.length();
+    if (pkt.data_len > 0) {
+        memcpy(pkt.msg, payload.c_str(), pkt.data_len);
+    }
+
+    return esp_now_send(targetMac, (uint8_t*)&pkt, sizeof(MessageStruct) - MSG_CHUNK_SIZE + pkt.data_len) == ESP_OK;
+}
+
+/// @brief Odošle ACK správu cez ESP-NOW.
+/// @param targetMac MAC adresa cieľa
+/// @param messageId ID správy, ktorú ACKujem
+void sendMessageAck(const uint8_t* targetMac, uint16_t messageId) {
+    if (targetMac == nullptr) return;
+    addOrRefreshPeer(targetMac);
+
+    MessageStruct ack{};
+    ack.type = P_MSG_ACK;
+    ack.message_id = messageId;
+    esp_now_send(targetMac, (uint8_t*)&ack, sizeof(MessageStruct) - MSG_CHUNK_SIZE);
+}
+
+/// @brief Zabezpečí existenciu kľúča pre danú MAC adresu. 
+/// @param mac MAC adresa
+/// @return Kľúč kontaktu
+String ensureContactKeyForMac(const String& mac) {
+    String contactKey = findContactKeyByMac(contacts, mac);
+    if (contactKey.length() > 0) return contactKey;
+
+    contactKey = mac;
+    JsonObject obj = contacts.createNestedObject(contactKey.c_str());
+    obj["username"] = "Peer " + mac.substring(12);
+    obj.createNestedArray("messages");
+    JsonObject keys = obj.createNestedObject("keys");
+    keys["status"] = "none";
+    saveContacts(contacts, "/m5pager/contacts.json");
+    return contactKey;
+}
+
+/// @brief Vyžiada výmenu kľúčov s daným kontaktom.
+/// @param contactMac MAC adresa kontaktu
+/// @return TRUE ak bol požiadavka odoslaná, FALSE pri chybe
+bool requestKeyExchange(const char* contactMac) {
+    if (contactMac == nullptr) return false;
+
+    uint8_t peerMac[6];
+    if (!parseMacAddress(contactMac, peerMac)) return false;
+    if (!addOrRefreshPeer(peerMac)) return false;
+
+    String publicKeyHex;
+    if (!MessageCrypto::getOwnPublicKeyHex(publicKeyHex)) return false;
+
+    String contactKey = findContactKeyByMac(contacts, String(contactMac));
+    if (contactKey.length() == 0) contactKey = String(contactMac);
+    JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
+    keys["status"] = "pending";
+    keys["x25519_own_pub"] = publicKeyHex;
+    saveContacts(contacts, "/m5pager/contacts.json");
+
+    return sendSinglePacket(P_INIT_EXCH, peerMac, publicKeyHex);
+}
+/// @brief Spracuje paket výmeny kľúčov.
+/// @param mac_addr MAC adresa odosielateľa
+/// @param pkt Paket
+void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) {
+    String senderMac = macToString(mac_addr);
+    String contactKey = ensureContactKeyForMac(senderMac);
+    String peerPublicHex = packetPayloadToString(pkt);
+
+    if (pkt.type == P_EXCH_OK) {
+        return;
+    }
+
+    bool ok = MessageCrypto::storePeerPublicAndSession(contacts, contactKey, peerPublicHex);
+    if (!ok) {
+        JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
+        keys["status"] = "error";
+        saveContacts(contacts, "/m5pager/contacts.json");
+        return;
+    }
+
+    saveContacts(contacts, "/m5pager/contacts.json");
+
+    String ownPublicHex;
+    if (!MessageCrypto::getOwnPublicKeyHex(ownPublicHex)) return;
+
+    if (pkt.type == P_INIT_EXCH) {
+        sendSinglePacket(P_ACK_EXCH, mac_addr, ownPublicHex, pkt.message_id);
+    } else if (pkt.type == P_ACK_EXCH) {
+        sendSinglePacket(P_EXCH_OK, mac_addr, "", pkt.message_id);
+    }
+
+    if (currentMenu == MENU_MESSAGE && selectedContact && senderMac.equalsIgnoreCase(selectedContact)) {
+        drawMessageMenu();
+    }
+}
+
+/// @brief Handler pre prijaté ESP-NOW pakety. (nepoužítý, ale je ho treba)
+/// @param mac_addr 
+/// @param status 
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+    Serial.print("[+] Last packet send status: ");
+    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
+
+/// @brief Handler pre prijaté ESP-NOW pakety. Spracuje prijaté pakety, zloží ich z častí, dešifruje a uloží do histórie zpráv. ACK a refresh
+/// @param mac_addr MAC adresa odosielateľa
+/// @param data Prijaté dáta
+/// @param data_len Dĺžka prijatých dát
 void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     const int headerSize = sizeof(MessageStruct) - MSG_CHUNK_SIZE;
     if (data_len < headerSize || data_len > static_cast<int>(sizeof(MessageStruct))) return;
@@ -132,7 +279,26 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     if (pkt.type == P_MSG_ACK) {
         if (awaitingAck && pkt.message_id == awaitingMsgId) {
             awaitingAck = false;
+            if (pendingOutgoingReady) {
+                String contactKey = pendingOutgoingContact;
+                appendMessage(contacts, contactKey, "out", pendingOutgoingText.c_str());
+
+                pendingOutgoingReady = false;
+                pendingOutgoingContact = "";
+                pendingOutgoingText = "";
+
+                if (currentMenu == MENU_MESSAGE &&
+                    selectedContact &&
+                    contactKey.equalsIgnoreCase(selectedContact)) {
+                    drawMessageMenu();
+                }
+            }
         }
+        return;
+    }
+
+    if (pkt.type == P_INIT_EXCH || pkt.type == P_ACK_EXCH || pkt.type == P_EXCH_OK) {
+        handleKeyExchangePacket(mac_addr, pkt);
         return;
     }
 
@@ -169,10 +335,19 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     }
 
     if (complete) {
+        sendMessageAck(mac_addr, pkt.message_id);
+
         String senderMac = macToString(mac_addr);
-        String contactKey = findContactKeyByMac(contacts, senderMac);
+        String contactKey = ensureContactKeyForMac(senderMac);
         if (contactKey.length() > 0) {
-            appendMessage(contacts, contactKey, "in", assembly.data.c_str());
+            String plaintext;
+            if (MessageCrypto::decryptPayload(contacts, contactKey, assembly.data, plaintext)) {
+                appendMessage(contacts, contactKey, "in", plaintext.c_str());
+            } else if (MessageCrypto::hasReadySession(contacts, contactKey)) {
+                appendMessage(contacts, contactKey, "in", "[Message decrypt failed]");
+            } else {
+                appendMessage(contacts, contactKey, "in", "[Encrypted message - key missing]");
+            }
         }
 
         if (currentMenu == MENU_MESSAGE &&
@@ -181,12 +356,6 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
             drawMessageMenu();
         }
     }
-
-    addOrRefreshPeer(mac_addr);
-    MessageStruct ack{};
-    ack.type = P_MSG_ACK;
-    ack.message_id = pkt.message_id;
-    esp_now_send(mac_addr, (uint8_t*)&ack, sizeof(MessageStruct) - MSG_CHUNK_SIZE);
 }
 
 /*
@@ -226,12 +395,9 @@ void setup() {
 
   M5Cardputer.Display.println("[+] SD Card initialized.");  
 
-  //wifi setup
   WiFi.mode(WIFI_AP_STA);
   WiFi.disconnect();
   
-
-  //this might not be necessary, but just in case
   if (ScanAP(ssid)) {
     M5Cardputer.Display.println("[+] Network exists. Connecting.");
     WiFi.begin(ssid, password);
@@ -279,11 +445,12 @@ void setup() {
 
   delay(1000);
   M5Cardputer.Display.setTextScroll(false);
-  M5Cardputer.Display.fillScreen(0);
+  M5Cardputer.Display.fillScreen(uiBgColor());
   M5Cardputer.Display.setCursor(0, 0);
   M5Cardputer.Display.setTextSize(1);
+  M5Cardputer.Display.setTextColor(uiTextPrimaryColor(), uiBgColor());
 
-  //typewriter effect for nice welcome message :3
+  //animácia privítania
   user = config["username"] | "User";
   String welcomeMsg = "Welcome back, " + String(user) + "!\n";
   M5Cardputer.Display.setCursor(M5Cardputer.Display.width() / 2 - welcomeMsg.length() * 3, M5Cardputer.Display.height() / 2 - 4);
@@ -312,7 +479,7 @@ void loop() {
     }
 
 
-  //up and down are ; and . respectively, handled in the loop above
+  //up and down are ; and .
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) key = KEY_ENTER; //SELECT
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) key = KEY_BACKSPACE; //BACK
 
@@ -321,15 +488,20 @@ void loop() {
       delay(150);
   }
 
+    //Ak nie je ACKed
     if (awaitingAck && millis() - sendTimestamp > ACK_TIMEOUT) {
         awaitingAck = false;
-        M5Cardputer.Display.setTextColor(RED, BLACK);
-        M5Cardputer.Display.println("[-] Message failed to send");
-        delay(800);
+        pendingOutgoingReady = false;
+        pendingOutgoingContact = "";
+        pendingOutgoingText = "";
+        showErrorToast("Message failed to send");
+        if (currentMenu == MENU_MESSAGE) {
+            drawMessageMenu();
+        }
     }
 
   if (currentMenu != previousMenu) {
-      M5Cardputer.Display.fillScreen(0);
+      M5Cardputer.Display.fillScreen(uiBgColor());
       menus[currentMenu].draw();
       previousMenu = currentMenu;
       menuIndex = 0;

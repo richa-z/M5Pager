@@ -11,13 +11,18 @@
 #include "util/util.h"
 #include "security/device_key_store.h"
 
-constexpr uint8_t ENC_FILE_MAGIC[] = {'M', '5', 'E', 'N', 'C', '0', '1'};
-constexpr size_t ENC_FILE_MAGIC_LEN = sizeof(ENC_FILE_MAGIC);
+
+constexpr uint8_t ENC_FILE_MAGIC[] = {'M', '5', 'E', 'N', 'C', '0', '1'}; //Magic bytes pre identifikáciu našich šifrovaných súborů
+constexpr size_t ENC_FILE_MAGIC_LEN = sizeof(ENC_FILE_MAGIC); 
 constexpr uint8_t ENC_FILE_VERSION = 1;
 constexpr size_t ENC_FILE_LEN_FIELD = 4;
 constexpr size_t ENC_FILE_HEADER_LEN =
-    ENC_FILE_MAGIC_LEN + 1 + Security::GCM_IV_LEN + Security::GCM_TAG_LEN + ENC_FILE_LEN_FIELD;
+    ENC_FILE_MAGIC_LEN + 1 + Security::GCM_IV_LEN + Security::GCM_TAG_LEN + ENC_FILE_LEN_FIELD; //Dĺžka hlavičky šifrovaného souboru
 
+
+/// @brief Zapíše 32-bitové číslo do pola v little-endian formáte
+/// @param out Pole, do ktorého sa má číslo zapísať
+/// @param value Číslo na zapísanie
 inline void writeLE32(uint8_t out[4], uint32_t value) {
     out[0] = static_cast<uint8_t>(value & 0xFF);
     out[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
@@ -25,6 +30,9 @@ inline void writeLE32(uint8_t out[4], uint32_t value) {
     out[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
 }
 
+/// @brief Načíta 32-bitové číslo z pola v little-endian formáte
+/// @param in Pole, z ktorého sa má číslo načítať
+/// @return Načítané číslo
 inline uint32_t readLE32(const uint8_t in[4]) {
     return static_cast<uint32_t>(in[0]) |
            (static_cast<uint32_t>(in[1]) << 8) |
@@ -32,6 +40,11 @@ inline uint32_t readLE32(const uint8_t in[4]) {
            (static_cast<uint32_t>(in[3]) << 24);
 }
 
+/// @brief Načíta bajty z súboru do dynamicky alokovaného pola.
+/// @param filename Názov súboru
+/// @param outBytes Pole, do ktorého sa načítajú bajty (alokované v rámci funkcie, po použití je potrebné ho uvoľniť)
+/// @param outLen Premenná, do ktorej sa uloží dĺžka načítaných bajtov
+/// @return 
 inline bool readFileBytes(const char* filename, uint8_t*& outBytes, size_t& outLen) {
     outBytes = nullptr;
     outLen = 0;
@@ -62,6 +75,11 @@ inline bool readFileBytes(const char* filename, uint8_t*& outBytes, size_t& outL
     return true;
 }
 
+/// @brief Zapíše šifrované dáta do súboru na zadanú cestu.
+/// @param filename Názov súboru
+/// @param plaintext Šifrované dáta
+/// @param plaintextLen Dĺžka šifrovaných dát
+/// @return TRUE, ak sa operácia podarila, inak FALSE
 inline bool writeEncryptedBlobAtPath(const char* filename,
                                      const uint8_t* plaintext,
                                      size_t plaintextLen) {
@@ -106,6 +124,11 @@ inline bool writeEncryptedBlobAtPath(const char* filename,
     return writeOk;
 }
 
+/// @brief Zapíše šifrované dáta do súboru atomicky (v rámci jednej operácie).
+/// @param filename Názov súboru
+/// @param plaintext Šifrované dáta
+/// @param plaintextLen Dĺžka šifrovaných dát
+/// @return TRUE, ak sa operácia podarila, inak FALSE
 inline bool writeEncryptedBlobAtomic(const char* filename,
                                      const uint8_t* plaintext,
                                      size_t plaintextLen) {
@@ -142,6 +165,13 @@ inline bool writeEncryptedBlobAtomic(const char* filename,
     return true;
 }
 
+/// @brief Dekryptuje šifrovaný blob načítaný zo súboru.
+/// @param filename Názov súboru
+/// @param fileBytes Bajty súboru
+/// @param fileLen Dĺžka bajtov súboru
+/// @param outPlain Dekryptované dáta (alokované v rámci funkcie)
+/// @param outPlainLen Dĺžka dekryptovaných dát
+/// @return TRUE, ak sa operácia podarila, inak FALSE
 inline bool decryptEncryptedBlob(const uint8_t* fileBytes,
                                  size_t fileLen,
                                  uint8_t*& outPlain,
@@ -181,6 +211,11 @@ inline bool decryptEncryptedBlob(const uint8_t* fileBytes,
     return true;
 }
 
+/// @brief Uloží JSON dokument do šifrovaného súboru.
+/// @param doc JSON dokument
+/// @param filename Názov súboru
+/// @param label Popis súboru
+/// @return TRUE, ak sa operácia podarila, inak FALSE
 inline bool saveJsonEncrypted(const DynamicJsonDocument& doc, const char* filename, const char* label) {
     if (!Security::hasFilesystemKey()) {
         M5Cardputer.Display.println("[-] Storage key not available.");
@@ -207,6 +242,12 @@ inline bool saveJsonEncrypted(const DynamicJsonDocument& doc, const char* filena
     return ok;
 }
 
+/// @brief Načíta JSON dokument zo šifrovaného súboru alebo vytvorí predvolený dokument.
+/// @param doc JSON dokument (výstup)
+/// @param filename Názov súboru
+/// @param label Popis súboru
+/// @param defaultJson Predvolený JSON obsah
+/// @return TRUE, ak sa operácia podarila, inak FALSE
 inline bool loadJsonEncryptedAware(DynamicJsonDocument& doc,
                                    const char* filename,
                                    const char* label,
@@ -293,15 +334,27 @@ inline bool loadJsonEncryptedAware(DynamicJsonDocument& doc,
     return true;
 }
 
+/// @brief Načíta kontakty zo súboru alebo vytvorí predvolený zoznam.
+/// @param contacts Premenná, do ktorej sa načítajú kontakty (výstup)
+/// @param filename Názov súboru
+/// @return TRUE, ak sa operácia podarila, inak FALSE
 bool loadContacts(DynamicJsonDocument &contacts, const char* filename) {
     M5Cardputer.Display.println("[*] Loading contacts...");
     return loadJsonEncryptedAware(contacts, filename, "contacts", "{}");
 }
 
+/// @brief Uloží kontakty do súboru.
+/// @param contacts Kontakty, ktoré se majú uložiť
+/// @param filename Názov súboru
+/// @return TRUE, ak sa operácia podarila, inak FALSE
 bool saveContacts(const DynamicJsonDocument &contacts, const char* filename) {
     return saveJsonEncrypted(contacts, filename, "contacts");
 }
 
+/// @brief Načíta konfiguráciu zo súboru alebo vytvorí predvolené nastavenie.
+/// @param config Premenná, do ktorej sa načítajú konfiguračné nastavenia (výstup)
+/// @param filename Názov súboru
+/// @return TRUE, ak sa operácia podarila, inak FALSE
 bool loadConfig(DynamicJsonDocument &config, const char* filename) {
     M5Cardputer.Display.println("[*] Loading config...");
     if (!loadJsonEncryptedAware(config, filename, "config", "{\"username\":\"User\"}")) {
@@ -316,9 +369,10 @@ bool loadConfig(DynamicJsonDocument &config, const char* filename) {
     return true;
 }
 
+/// @brief Uloží konfiguráciu do súboru.
+/// @param config Konfigurácia, ktorá sa má uložiť
+/// @param filename Názov súboru
+/// @return TRUE, ak sa operácia podarila, inak FALSE
 bool saveConfig(const DynamicJsonDocument &config, const char* filename) {
     return saveJsonEncrypted(config, filename, "config");
 }
-
-//TODO: add functions to add, remove, edit contacts in the DynamicJsonDocument
-//TODO: add function to load message history from file (also unload to save memory on leave)

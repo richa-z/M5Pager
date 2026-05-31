@@ -15,38 +15,45 @@
 extern MenuState currentMenu;
 extern DynamicJsonDocument contacts;
 
-// input buffers
 extern String newContactName = "";
 extern String newContactMac  = "";
 
 extern AddContactStep addStep = ADD_NAME;
 
+inline const char* addContactStepLabel(AddContactStep step) {
+    switch (step) {
+        case ADD_NAME: return "NAME";
+        case ADD_MAC: return "MAC";
+        case ADD_CONFIRM: return "CONFIRM";
+        default: return "";
+    }
+}
+
 void drawAddContact() {
     beginScreenFrame();
-    M5Cardputer.Display.setTextColor(WHITE, BLACK);
+    drawSectionTitle("ADD CONTACT");
 
-    M5Cardputer.Display.println("Add Contact");
-    drawSeparator();
+    String progress = String("Step ") + String(static_cast<int>(addStep) + 1) + "/3 - " + addContactStepLabel(addStep);
+    drawHintLine(progress, UI_CONTENT_TOP_Y + 14, uiTextMutedColor());
 
     switch (addStep) {
         case ADD_NAME:
-            M5Cardputer.Display.println("Enter username:");
-            M5Cardputer.Display.println(newContactName);
+            drawInputCard("Username", newContactName, "type contact name", UI_CONTENT_TOP_Y + 24, 30);
+            drawHintLine("Enter Next", UI_CONTENT_TOP_Y + 58, uiAccentColor());
+            drawHintLine("` Back", UI_CONTENT_TOP_Y + 68, uiTextMutedColor());
             break;
 
         case ADD_MAC:
-            M5Cardputer.Display.println("Enter MAC address:");
-            M5Cardputer.Display.println("AA:BB:CC:DD:EE:FF");
-            M5Cardputer.Display.println(newContactMac);
+            drawInputCard("MAC (AA:BB:CC:DD:EE:FF)", newContactMac, "12:34:56:78:9A:BC", UI_CONTENT_TOP_Y + 24, 30);
+            drawHintLine("Enter Next", UI_CONTENT_TOP_Y + 58, uiAccentColor());
+            drawHintLine("` Back", UI_CONTENT_TOP_Y + 68, uiTextMutedColor());
             break;
 
         case ADD_CONFIRM:
-            M5Cardputer.Display.println("Confirm contact:");
-            M5Cardputer.Display.println("Name: " + newContactName);
-            M5Cardputer.Display.println("MAC:  " + newContactMac);
-            M5Cardputer.Display.println("");
-            M5Cardputer.Display.println("[ENTER] Save");
-            M5Cardputer.Display.println("[ESC] Back");
+            drawCardRow("Name: " + newContactName, 0, false, UI_CONTENT_TOP_Y + 24);
+            drawCardRow("MAC: " + newContactMac, 1, false, UI_CONTENT_TOP_Y + 24);
+            drawHintLine("Enter Save", UI_CONTENT_TOP_Y + 66, uiAccentColor());
+            drawHintLine("` Back", UI_CONTENT_TOP_Y + 76, uiTextMutedColor());
             break;
     }
 }
@@ -75,9 +82,8 @@ void handleAddContactInput(int key) {
         if (addStep == ADD_MAC) {
             uint8_t parsedMac[6];
             if (!parseMacAddress(newContactMac.c_str(), parsedMac)) {
-                M5Cardputer.Display.setTextColor(RED, BLACK);
-                M5Cardputer.Display.println("[-] Invalid MAC format");
-                delay(800);
+                drawAddContact();
+                showErrorToast("Invalid MAC format");
                 drawAddContact();
                 return;
             }

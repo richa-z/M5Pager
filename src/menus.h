@@ -1,6 +1,6 @@
 #pragma once
 
-//used for menu navigation states -> so input isnt dumb and can be expanded later
+//slúži na označenie stavov navigácie v ponuke -> takže vstup nie je obmedzený a dá sa neskôr rozšíriť
 enum MenuState {
     MENU_MAIN,
     MENU_CONTACTS,
@@ -13,7 +13,7 @@ enum MenuState {
 };
 
 
-//function for drawLogic and inputLogic pointers
+//definícia menu handleru, ktorý obsahuje funkciu pre vykreslenie menu a funkciu pre spracovanie vstupu v danom menu
 typedef void (*DrawFunc)();
 typedef void (*InputFunc)(int key);
 struct MenuHandler {

@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <stdint.h>
 
+/// @brief Skontroluje či je dostupná WiFi sieť s daným SSID.
+/// @param ssid Meno Wifi siete
+/// @return TRUE, ak je sieť dostupná, inak FALSE
 bool ScanAP(const char* ssid) {
     int ssid_amnt = WiFi.scanNetworks();
     if (ssid_amnt == -1) {
@@ -20,6 +23,10 @@ bool ScanAP(const char* ssid) {
     return false;
 }
 
+/// @brief Prevedie reťazec s MAC adresou na pole bajtov.
+/// @param macStr Reťazec s MAC adresou vo formáte "XX:XX:XX:XX:XX:XX"
+/// @param outMac Pole 6 bajtov pre uloženie MAC adresy
+/// @return TRUE, ak bol reťazec úspešne prevedený, inak FALSE
 bool parseMacAddress(const char* macStr, uint8_t outMac[6]) {
     if (macStr == nullptr || outMac == nullptr) return false;
     if (strlen(macStr) != 17) return false;

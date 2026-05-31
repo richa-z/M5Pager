@@ -15,15 +15,10 @@ extern const char* selectedContact;
 
 void drawEditContact() {
     beginScreenFrame();
-    M5Cardputer.Display.setTextColor(WHITE, BLACK);
-
-    M5Cardputer.Display.println("Edit Contact");
-    drawSeparator();
-    M5Cardputer.Display.println("New name:");
-    M5Cardputer.Display.println(editContactName);
-    M5Cardputer.Display.println("");
-    M5Cardputer.Display.println("[ENTER] Save");
-    M5Cardputer.Display.println("[` ] Cancel");
+    drawSectionTitle("EDIT CONTACT");
+    drawInputCard("Username", editContactName, "type new name", UI_CONTENT_TOP_Y + 24, 30);
+    drawHintLine("Enter Save", UI_CONTENT_TOP_Y + 58, uiAccentColor());
+    drawHintLine("` Cancel", UI_CONTENT_TOP_Y + 68, uiTextMutedColor());
 }
 
 void handleEditContactInput(int key) {

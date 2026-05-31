@@ -19,6 +19,7 @@ enum class DeviceKeyProvisionState : uint8_t {
 
 namespace Security {
 
+// Konštanty pre kľúče a kryptografické operácie
 constexpr size_t DEVICE_PRIVATE_KEY_LEN = 32;
 constexpr size_t FILESYSTEM_KEY_LEN = 32;
 constexpr size_t PASSWORD_WRAP_KEY_LEN = 32;
@@ -28,6 +29,7 @@ constexpr size_t GCM_IV_LEN = 12;
 constexpr size_t GCM_TAG_LEN = 16;
 constexpr uint32_t PASSWORD_KDF_ITERATIONS = 60000;
 
+// Názvy pre NVS kľúče a namespace
 constexpr const char* DEVICE_KEY_NAMESPACE = "crypto";
 constexpr const char* LEGACY_DEVICE_KEY_NAME = "device_sk";
 constexpr const char* WRAP_MARKER_KEY = "wrap_v1";
@@ -38,10 +40,12 @@ constexpr const char* WRAP_TAG_KEY = "sk_tag";
 constexpr const char* WRAP_CIPHERTEXT_KEY = "sk_ct";
 constexpr const char* FILESYSTEM_SALT_KEY = "fs_salt";
 
+// Konštanty pre kontexty a AAD v kryptografických operáciách
 constexpr char KEY_WRAP_AAD[] = "M5PAGER_SK_WRAP_V1";
 constexpr char FILE_AAD[] = "M5PAGER_FILE_V1";
 constexpr char FILESYSTEM_DERIVE_CONTEXT[] = "M5PAGER_FS_KEY_V1";
 
+// Štruktúra pre ukladanie runtime informácií o kľúčoch
 struct DeviceKeyRuntime {
     bool ready = false;
     bool filesystemReady = false;
@@ -50,11 +54,16 @@ struct DeviceKeyRuntime {
     uint8_t filesystemKey[FILESYSTEM_KEY_LEN] = {0};
 };
 
+/// @brief Vráti referenciu na runtime štruktúru pre kľúče zariadenia.
+/// @return Referencia na runtime štruktúru pre kľúče zariadenia
 inline DeviceKeyRuntime& deviceKeyRuntime() {
     static DeviceKeyRuntime runtime;
     return runtime;
 }
 
+/// @brief  Vynulovanie hodnoty v pamäti
+/// @param ptr Pointer na pamať, ktorú je potrebné vynulovať
+/// @param len Dĺžka pamaťového bloku
 inline void secureZero(void* ptr, size_t len) {
     volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
     while (len--) {
@@ -62,6 +71,8 @@ inline void secureZero(void* ptr, size_t len) {
     }
 }
 
+/// @brief Inicializuje úložisko NVS
+/// @return TRUE, ak bolo úložisko úspešne inicializované, inak FALSE
 inline bool initNvsStorage() {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -74,6 +85,12 @@ inline bool initNvsStorage() {
     return err == ESP_OK;
 }
 
+/// @brief Načíta blob z NVS a skontroluje, či má presne očakávanú dĺžku.
+/// @param handle NVS handle
+/// @param key Názov kľúča v NVS
+/// @param out Pole pre uloženie načtených bajtov
+/// @param expectedLen Očakávaná dĺžka blobu
+/// @return TRUE, ak bol blob úspešne načítaný a má správnu dĺžku, inak FALSE
 inline bool readBlobExact(nvs_handle_t handle, const char* key, uint8_t* out, size_t expectedLen) {
     if (out == nullptr || expectedLen == 0) return false;
 
@@ -86,10 +103,13 @@ inline bool readBlobExact(nvs_handle_t handle, const char* key, uint8_t* out, si
     return err == ESP_OK && len == expectedLen;
 }
 
-inline bool derivePasswordWrapKey(const String& password,
-                                  const uint8_t salt[PASSWORD_SALT_LEN],
-                                  uint32_t iterations,
-                                  uint8_t outKey[PASSWORD_WRAP_KEY_LEN]) {
+/// @brief Odvodí kľúč pre základné šifrovanie z hesla pomocou PBKDF2-HMAC-SHA256.
+/// @param password Heslo
+/// @param salt Soľ
+/// @param iterations Počet iterácií
+/// @param outKey Pole pre uloženie odvodeného kľúča
+/// @return TRUE, ak bol kľúč úspešne odvodený, inak FALSE
+inline bool derivePasswordWrapKey(const String& password, const uint8_t salt[PASSWORD_SALT_LEN], uint32_t iterations, uint8_t outKey[PASSWORD_WRAP_KEY_LEN]) {
     if (password.length() == 0) return false;
 
     const mbedtls_md_info_t* mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
@@ -113,6 +133,16 @@ inline bool derivePasswordWrapKey(const String& password,
     return rc == 0;
 }
 
+/// @brief Zašifruje správu pomocou AES-GCM.
+/// @param key Kľúč pre šifrovanie
+/// @param input Vstupné dáta
+/// @param inputLen Dĺžka vstupných dát
+/// @param aad AAD (Additional Authenticated Data)
+/// @param aadLen Dĺžka AAD
+/// @param iv Pole pre vektor inicializácie (IV)
+/// @param output Pole pre uloženie zašifrovaných dát
+/// @param tag Pole pro uloženie autentifikačného tagu
+/// @return TRUE, ak bola správa úspešne zašifrovaná, inak FALSE
 inline bool aesGcmEncrypt(const uint8_t key[32],
                           const uint8_t* input,
                           size_t inputLen,
@@ -148,6 +178,16 @@ inline bool aesGcmEncrypt(const uint8_t key[32],
     return rc == 0;
 }
 
+/// @brief Dešifruje správu pomocou AES-GCM.
+/// @param key Kľúč pre dešifrovanie
+/// @param input Zašifrované dáta
+/// @param inputLen Dĺžka zašifrovaných dát
+/// @param aad AAD (Additional Authenticated Data)
+/// @param aadLen Dĺžka AAD
+/// @param iv Vektor inicializácie (IV)
+/// @param tag Autentifikačný tag
+/// @param output Pole pre uloženie dešifrovaných dát
+/// @return TRUE, ak bola správa úspešne dešifrovaná, inak FALSE
 inline bool aesGcmDecrypt(const uint8_t key[32],
                           const uint8_t* input,
                           size_t inputLen,
@@ -180,6 +220,11 @@ inline bool aesGcmDecrypt(const uint8_t key[32],
     return rc == 0;
 }
 
+/// @brief Odvodí kľúč pre súborový systém z privátneho kľúča a soli.
+/// @param privateKey Privátny kľúč
+/// @param fsSalt Soľ pre súborový systém
+/// @param outKey Pole pre uloženie odvodeného kľúča
+/// @return TRUE, ak bol kľúč úspešne odvodený, inak FALSE
 inline bool deriveFilesystemKey(const uint8_t privateKey[DEVICE_PRIVATE_KEY_LEN],
                                 const uint8_t fsSalt[FILESYSTEM_SALT_LEN],
                                 uint8_t outKey[FILESYSTEM_KEY_LEN]) {
@@ -199,6 +244,9 @@ inline bool deriveFilesystemKey(const uint8_t privateKey[DEVICE_PRIVATE_KEY_LEN]
     return rc == 0;
 }
 
+/// @brief Skryje heslo v konzole.
+/// @param password Heslo
+/// @return Skryté heslo (***)
 inline String maskPassword(const String& password) {
     String masked = "";
     masked.reserve(password.length());
@@ -208,6 +256,8 @@ inline String maskPassword(const String& password) {
     return masked;
 }
 
+/// @brief Čaká na stlačenie klávesy na klávesnici a vrátí jej hodnotu.
+/// @return Hodnota stlačenej klávesy
 inline int waitForKeyboardKey() {
     while (true) {
         M5Cardputer.update();
@@ -231,30 +281,72 @@ inline int waitForKeyboardKey() {
     }
 }
 
+/// @brief Vykreslí výzvu na zadanie hesla.
+/// @param title Nadpis výzvy
+/// @param password Aktuálne heslo
+/// @param footer Päta výzvy (nepovinné)
 inline void drawPasswordPrompt(const char* title, const String& password, const char* footer = nullptr) {
-    M5Cardputer.Display.fillScreen(BLACK);
-    M5Cardputer.Display.setCursor(0, 0);
-    M5Cardputer.Display.setTextSize(1);
-    M5Cardputer.Display.setTextFont(2);
-    M5Cardputer.Display.setTextColor(WHITE, BLACK);
+    uint16_t bgColor = M5Cardputer.Display.color565(8, 10, 14);
+    uint16_t panelColor = M5Cardputer.Display.color565(18, 22, 30);
+    uint16_t lineColor = M5Cardputer.Display.color565(44, 52, 64);
+    uint16_t titleColor = M5Cardputer.Display.color565(236, 240, 248);
+    uint16_t mutedColor = M5Cardputer.Display.color565(146, 160, 182);
 
-    M5Cardputer.Display.println(title);
-    M5Cardputer.Display.println("----------------");
-    M5Cardputer.Display.println(maskPassword(password));
-    M5Cardputer.Display.println("");
-    M5Cardputer.Display.println("[ENTER] Confirm");
-    M5Cardputer.Display.println("[BKSP ] Delete");
+    M5Cardputer.Display.fillScreen(bgColor);
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.setTextFont(1);
+    M5Cardputer.Display.setTextColor(titleColor, bgColor);
+    M5Cardputer.Display.setCursor(6, 8);
+    M5Cardputer.Display.print(title);
+    M5Cardputer.Display.drawFastHLine(6, 18, M5Cardputer.Display.width() - 12, lineColor);
+
+    int boxX = 6;
+    int boxY = 28;
+    int boxW = M5Cardputer.Display.width() - 12;
+    int boxH = 24;
+    M5Cardputer.Display.fillRoundRect(boxX, boxY, boxW, boxH, 4, panelColor);
+    M5Cardputer.Display.drawRoundRect(boxX, boxY, boxW, boxH, 4, lineColor);
+    M5Cardputer.Display.setCursor(boxX + 6, boxY + 8);
+    M5Cardputer.Display.setTextColor(titleColor, panelColor);
+    M5Cardputer.Display.print(maskPassword(password));
+
+    M5Cardputer.Display.setTextColor(mutedColor, bgColor);
+    M5Cardputer.Display.setCursor(6, 62);
+    M5Cardputer.Display.print("Enter Confirm");
+    M5Cardputer.Display.setCursor(6, 72);
+    M5Cardputer.Display.print("BKSP Delete");
     if (footer != nullptr) {
-        M5Cardputer.Display.println(footer);
+        M5Cardputer.Display.setCursor(6, 82);
+        M5Cardputer.Display.print(footer);
     }
 }
 
+/// @brief Zobrazí správu v oblasti hesla.
+/// @param msg Správa
+/// @param color Farba správy
+/// @param waitMs Čas čakania
 inline void showPasswordMessage(const char* msg, uint16_t color = WHITE, uint16_t waitMs = 1000) {
-    M5Cardputer.Display.setTextColor(color, BLACK);
-    M5Cardputer.Display.println(msg);
+    uint16_t panelColor = M5Cardputer.Display.color565(18, 22, 30);
+    int x = 6;
+    int h = 18;
+    int w = M5Cardputer.Display.width() - 12;
+    int y = M5Cardputer.Display.height() - h - 4;
+
+    M5Cardputer.Display.fillRoundRect(x, y, w, h, 4, panelColor);
+    M5Cardputer.Display.drawRoundRect(x, y, w, h, 4, color);
+    M5Cardputer.Display.setTextFont(1);
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.setTextColor(color, panelColor);
+    M5Cardputer.Display.setCursor(x + 6, y + 5);
+    M5Cardputer.Display.print(msg);
     delay(waitMs);
 }
 
+/// @brief Zachytí heslo od používateľa.
+/// @param title Nadpis výzvy
+/// @param outPassword Referencia na reťazec pre uloženie hesla
+/// @param maxLen Maximálna dĺžka hesla
+/// @return TRUE, ak bolo heslo úspešne zachytené, inak FALSE
 inline bool capturePassword(const char* title, String& outPassword, size_t maxLen = 32) {
     outPassword = "";
     while (true) {
@@ -282,6 +374,11 @@ inline bool capturePassword(const char* title, String& outPassword, size_t maxLe
     }
 }
 
+/// @brief Vytvorí runtime kľúče z privátneho kľúča a soli.
+/// @param privateKey Privátny kľúč zariadenia
+/// @param fsSalt Soľ pro odvodenie kľúča pre súborový systém
+/// @param state Stav poskytovania kľúčov
+/// @return TRUE, ak boli kľúče úspešne vytvorené, inak FALSE
 inline bool buildRuntimeKeys(const uint8_t privateKey[DEVICE_PRIVATE_KEY_LEN],
                              const uint8_t fsSalt[FILESYSTEM_SALT_LEN],
                              DeviceKeyProvisionState state) {
@@ -302,6 +399,12 @@ inline bool buildRuntimeKeys(const uint8_t privateKey[DEVICE_PRIVATE_KEY_LEN],
     return true;
 }
 
+/// @brief Nastaví ochranu heslom.
+/// @param handle Handle súborového systému NVS
+/// @param privateKey Privátny kľúč zariadenia
+/// @param hadLegacyUnwrappedKey Indikátor, či existoval neobalený kľúč (pre potrebu jeho odstránenia)
+/// @param generatedFreshKey Indikátor, či bol vygenerovaný nový kľúč (pre správne nastavenie stavu v runtime)
+/// @return TRUE, ak bola ochrana heslom úspešne nastavená, inak FALSE
 inline bool setupPasswordProtection(nvs_handle_t handle,
                                     const uint8_t privateKey[DEVICE_PRIVATE_KEY_LEN],
                                     bool hadLegacyUnwrappedKey,
@@ -396,6 +499,9 @@ inline bool setupPasswordProtection(nvs_handle_t handle,
     return runtimeOk;
 }
 
+/// @brief Odomkne existujúci kľúč.
+/// @param handle Handle súborového systému NVS
+/// @return TRUE, ak bol kľúč úspešne odomknutý, inak FALSE
 inline bool unlockExistingKey(nvs_handle_t handle) {
     uint8_t passwordSalt[PASSWORD_SALT_LEN];
     uint8_t fsSalt[FILESYSTEM_SALT_LEN];
@@ -467,6 +573,10 @@ inline bool unlockExistingKey(nvs_handle_t handle) {
     }
 }
 
+/// @brief Vypočíta FNV-1a 32-bit hash.
+/// @param data Pointer na dáta, z ktorých sa má hash vypočítať
+/// @param len Dĺžka dát
+/// @return Vypočítaný hash
 inline uint32_t fnv1a32(const uint8_t* data, size_t len) {
     uint32_t hash = 2166136261UL;
     for (size_t i = 0; i < len; i++) {
@@ -476,6 +586,8 @@ inline uint32_t fnv1a32(const uint8_t* data, size_t len) {
     return hash;
 }
 
+/// @brief Zaručí existenciu privátneho kľúča zariadenia.
+/// @return Stav poskytovania kľúčov zariadenia
 inline DeviceKeyProvisionState ensureDevicePrivateKey() {
     DeviceKeyRuntime& runtime = deviceKeyRuntime();
     if (runtime.ready) {
@@ -529,10 +641,14 @@ inline DeviceKeyProvisionState ensureDevicePrivateKey() {
     return runtime.state;
 }
 
+/// @brief Skontroluje, či existuje privátny kľúč zariadenia.
+/// @return TRUE, ak existuje, inak FALSE
 inline bool hasDevicePrivateKey() {
     return deviceKeyRuntime().ready;
 }
 
+/// @brief Získá pointer na privátny kľúč zariadenia.
+/// @return Pointer na privátny kľúč zariadenia, alebo nullptr, ak nie je k dispozicii
 inline const uint8_t* getDevicePrivateKey() {
     const DeviceKeyRuntime& runtime = deviceKeyRuntime();
     if (!runtime.ready) {
@@ -541,11 +657,15 @@ inline const uint8_t* getDevicePrivateKey() {
     return runtime.privateKey;
 }
 
+/// @brief Skontroluje, či je k dispozicii kľúč pre súborový systém.
+/// @return TRUE, ak je k dispozicii, inak FALSE
 inline bool hasFilesystemKey() {
     const DeviceKeyRuntime& runtime = deviceKeyRuntime();
     return runtime.ready && runtime.filesystemReady;
 }
 
+/// @brief Získá pointer na kľúč pre súborový systém.
+/// @return Pointer na kľúč pre súborový systém, alebo nullptr, ak nie je k dispozicii 
 inline const uint8_t* getFilesystemKey() {
     const DeviceKeyRuntime& runtime = deviceKeyRuntime();
     if (!runtime.ready || !runtime.filesystemReady) {
@@ -554,6 +674,13 @@ inline const uint8_t* getFilesystemKey() {
     return runtime.filesystemKey;
 }
 
+/// @brief Zašifruje buffer pre súborový systém pomocou AES-GCM.
+/// @param plaintext Vstupné dáta pre šifrovanie
+/// @param plaintextLen Dĺžka vstupných dát
+/// @param iv Pole pre vektor inicializácie (IV)
+/// @param ciphertext Pole pre uloženie zašifrovaných dát
+/// @param tag Pole pre uloženie autentifikačného tagu
+/// @return TRUE, ak boli dáta úspešne zašifrované, inak FALSE
 inline bool encryptFilesystemBuffer(const uint8_t* plaintext,
                                     size_t plaintextLen,
                                     uint8_t iv[GCM_IV_LEN],
@@ -572,6 +699,13 @@ inline bool encryptFilesystemBuffer(const uint8_t* plaintext,
                          tag);
 }
 
+/// @brief Dešifruje buffer pre súborový systém pomocou AES-GCM.
+/// @param ciphertext Vstupné dáta pre dešifrovánie
+/// @param ciphertextLen Dĺžka vstupných dát
+/// @param iv Vektor inicializácie (IV)
+/// @param tag Autentifikačný tag
+/// @param plaintext Výstupné dáta po dešifrovaní
+/// @return TRUE, ak boli dáta úspešne dešifrované, inak FALSE
 inline bool decryptFilesystemBuffer(const uint8_t* ciphertext,
                                     size_t ciphertextLen,
                                     const uint8_t iv[GCM_IV_LEN],
@@ -590,6 +724,8 @@ inline bool decryptFilesystemBuffer(const uint8_t* ciphertext,
                          plaintext);
 }
 
+/// @brief Získá fingerprint privátneho kľúča zariadenia.
+/// @return Fingerprint privátneho kľúča zariadenia, alebo "UNSET", ak kľúč není k dispozicii
 inline String getDeviceKeyFingerprint() {
     const DeviceKeyRuntime& runtime = deviceKeyRuntime();
     if (!runtime.ready) {
@@ -602,4 +738,4 @@ inline String getDeviceKeyFingerprint() {
     return String(out);
 }
 
-}  // namespace Security
+}
