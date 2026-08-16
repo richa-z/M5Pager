@@ -3,5 +3,7 @@
         "*.asm": "aspnetcorerazor",
         "typeinfo": "cpp",
         "string": "cpp"
-    }
+    },
+    "snyk.advanced.organization": "b606627a-d0a8-4d2b-a966-18cea819d0b2",
+    "snyk.advanced.autoSelectOrganization": true
 }

@@ -5,6 +5,27 @@
 #include <stdio.h>
 #include <stdint.h>
 
+// Limity dané štandardom WiFi / WPA2. Heslo kratšie než 8 znakov softAP odmietne -
+// bez kontroly by sa sieť buď nevytvorila, alebo vznikla ako otvorená.
+constexpr size_t WIFI_SSID_MAX_LEN = 32;
+constexpr size_t WIFI_PASS_MIN_LEN = 8;
+constexpr size_t WIFI_PASS_MAX_LEN = 63;
+
+/// @brief Overí, či je SSID použiteľné.
+/// @param ssid Meno siete
+/// @return TRUE, ak je SSID platné, inak FALSE
+inline bool isValidSsid(const String& ssid) {
+    return ssid.length() > 0 && ssid.length() <= WIFI_SSID_MAX_LEN;
+}
+
+/// @brief Overí, či heslo spĺňa požiadavky WPA2.
+/// @param password Heslo siete
+/// @return TRUE, ak je heslo platné, inak FALSE
+inline bool isValidWifiPassword(const String& password) {
+    return password.length() >= WIFI_PASS_MIN_LEN &&
+           password.length() <= WIFI_PASS_MAX_LEN;
+}
+
 /// @brief Skontroluje či je dostupná WiFi sieť s daným SSID.
 /// @param ssid Meno Wifi siete
 /// @return TRUE, ak je sieť dostupná, inak FALSE

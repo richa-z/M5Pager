@@ -25,6 +25,7 @@
 #include "menus/menu_add_contact.h"
 #include "menus/menu_contact_options.h"
 #include "menus/menu_edit_contact.h"
+#include "menus/menu_wifi.h"
 
 
 
@@ -56,15 +57,24 @@ MenuHandler menus[] = {
   {drawChangeUsername, handleChangeUsernameInput},
   {drawAddContact, handleAddContactInput},
   {drawContactOptions, handleContactOptionsInput},
-  {drawEditContact, handleEditContactInput}
+  {drawEditContact, handleEditContactInput},
+  {drawChangeSsid, handleChangeSsidInput},
+  {drawChangeSsidPass, handleChangeSsidPassInput}
 };
 
-//Comm login -> TODO: do nastaveni
-const char* ssid PROGMEM = "PAGER_COM";
-const char* password PROGMEM = "sd65fd4Fd4_dKAIu::?_a5df4sd";
+// Prihlasovacie údaje siete sa NEZAPISUJÚ do zdrojáku - boli by v gite aj v každom
+// vypísanom firmvéri a všetky zariadenia by zdieľali jedno heslo. Držia sa v config.json,
+// ktorý je na karte šifrovaný kľúčom zariadenia, a menia sa v Settings.
+constexpr const char* DEFAULT_WIFI_SSID = "PAGER_COM";
+
+String wifiSsid = "";
+String wifiPass = "";
 
 uint8_t selectedMac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-const char* selectedContact = nullptr;
+
+// Vlastnená kópia kľúča kontaktu. Ukazovateľ do JSON dokumentu tu byť nesmie -
+// dokument sa prealokuje pri raste a ukazovateľ by ostal visieť.
+String selectedContact = "";
 
 bool isAP = false;
 
@@ -81,24 +91,56 @@ char inputBuffer[MSG_CHUNK_SIZE];
 int bytesRead;
 bool messageSentFlag = false;
 
-const char* user = "User"; //username, nacitane/menene z configu, default "User"
+String user = "User"; //username, nacitane/menene z configu, default "User"
 String editContactName = "";
 String messageInput = "";
 bool isTypingMsg = false;
 
 bool awaitingAck = false;
 uint16_t awaitingMsgId = 0;
+uint8_t awaitingMac[6] = {0}; //komu sme poslali - ACK od nikoho iného neuznáme
 unsigned long sendTimestamp = 0;
 bool pendingOutgoingReady = false;
 String pendingOutgoingContact = "";
 String pendingOutgoingText = "";
 int messageScroll = 0;
+bool stealthMode = false;
+unsigned long nextAliveBroadcast = 0;
+
+// Po nečinnosti sa zariadenie zamkne - kľúče aj dešifrované dáta sa vymažú z RAM
+// a znovu sa pýta heslo. Bez toho stačí odložené odomknuté zariadenie zdvihnúť.
+constexpr unsigned long IDLE_LOCK_TIMEOUT_MS = 5UL * 60UL * 1000UL;
+unsigned long lastActivityMs = 0;
+
+// Efemérny súkromný kľúč rozpracovanej výmeny. Drží sa VÝHRADNE v RAM a po dokončení
+// (alebo vypršaní) sa vynuluje - práve jeho zahodenie dáva forward secrecy.
+constexpr unsigned long KEY_EXCHANGE_TIMEOUT_MS = 30UL * 1000UL;
+bool pendingExchangeValid = false;
+String pendingExchangeContact = "";
+uint8_t pendingExchangeEphPriv[MessageCrypto::X25519_KEY_LEN] = {0};
+unsigned long pendingExchangeStartedMs = 0;
+
+/// @brief Zahodí rozpracovanú výmenu kľúčov a vynuluje efemérny kľúč.
+void clearPendingExchange() {
+    Security::secureZero(pendingExchangeEphPriv, sizeof(pendingExchangeEphPriv));
+    pendingExchangeValid = false;
+    pendingExchangeContact = "";
+    pendingExchangeStartedMs = 0;
+}
 
 /*
 
 NETWORKING
 
 */
+
+// ESP-NOW receive callback beží vo WiFi tasku súbežne s loop(). Nesmie preto sahať
+// na JSON dokument, SD kartu ani na displej - všetko to používa aj loop() a nič z toho
+// nie je chránené zámkom. Callback preto paket iba odloží do fronty a spracuje ho loop().
+constexpr uint8_t RX_QUEUE_SIZE = 8;
+static RxQueueItem rxQueue[RX_QUEUE_SIZE];
+static volatile uint8_t rxQueueHead = 0;  //zapisuje konzument (loop)
+static volatile uint8_t rxQueueTail = 0;  //zapisuje producent (callback)
 
 /// @brief Pridá peer do ESP-NOW, ak nie je pridaný.
 /// @param peerMac Peer MAC adresa
@@ -129,8 +171,14 @@ bool selectContactPeer(const char* contactMac) {
 /// @brief Vráti nasledujúce ID pre kontrolné správy. Kontrolné správy sú tie, ktoré nie sú rozdelené na viacero paketov (napr. ACK, výmena kľúčov).
 /// @return Nasledujúce ID pre kontrolné správy
 uint16_t nextControlMessageId() {
-    static uint16_t controlMessageCounter = 40000;
-    return ++controlMessageCounter;
+    // Kontrolné ID majú vždy nastavený najvyšší bit, dátové (sendSplitMessage) nikdy.
+    // Predtým obe rady rástli v spoločnom 16-bitovom priestore a po pretečení sa
+    // začali prekrývať - ACK alebo odpoveď na výmenu kľúčov sa tak mohli spárovať
+    // s nesúvisiacou správou.
+    static uint16_t controlMessageCounter = 0;
+    controlMessageCounter = (controlMessageCounter + 1) & MESSAGE_ID_VALUE_MASK;
+    if (controlMessageCounter == 0) controlMessageCounter = 1;
+    return controlMessageCounter | MESSAGE_ID_CONTROL_FLAG;
 }
 
 /// @brief Prevedie payload paketu na string.
@@ -166,20 +214,33 @@ bool sendSinglePacket(PacketType type, const uint8_t* targetMac, const String& p
         memcpy(pkt.msg, payload.c_str(), pkt.data_len);
     }
 
-    return esp_now_send(targetMac, (uint8_t*)&pkt, sizeof(MessageStruct) - MSG_CHUNK_SIZE + pkt.data_len) == ESP_OK;
+    uint8_t wire[PACKET_MAX_LEN];
+    size_t wireLen = serializePacket(pkt, wire);
+    if (wireLen == 0) return false;
+
+    return esp_now_send(targetMac, wire, wireLen) == ESP_OK;
 }
 
 /// @brief Odošle ACK správu cez ESP-NOW.
 /// @param targetMac MAC adresa cieľa
-/// @param messageId ID správy, ktorú ACKujem
+/// @param messageId ID správy, ktorú ACKuje
 void sendMessageAck(const uint8_t* targetMac, uint16_t messageId) {
     if (targetMac == nullptr) return;
     addOrRefreshPeer(targetMac);
 
     MessageStruct ack{};
     ack.type = P_MSG_ACK;
+    esp_read_mac(ack.from, ESP_MAC_WIFI_STA);
     ack.message_id = messageId;
-    esp_now_send(targetMac, (uint8_t*)&ack, sizeof(MessageStruct) - MSG_CHUNK_SIZE);
+    ack.split_size = 1;
+    ack.split_index = 0;
+    ack.data_len = 0;
+
+    uint8_t wire[PACKET_MAX_LEN];
+    size_t wireLen = serializePacket(ack, wire);
+    if (wireLen == 0) return;
+
+    esp_now_send(targetMac, wire, wireLen);
 }
 
 /// @brief Zabezpečí existenciu kľúča pre danú MAC adresu. 
@@ -209,31 +270,149 @@ bool requestKeyExchange(const char* contactMac) {
     if (!parseMacAddress(contactMac, peerMac)) return false;
     if (!addOrRefreshPeer(peerMac)) return false;
 
-    String publicKeyHex;
-    if (!MessageCrypto::getOwnPublicKeyHex(publicKeyHex)) return false;
+    String staticPubHex;
+    if (!MessageCrypto::getOwnPublicKeyHex(staticPubHex)) return false;
+
+    // Pre každú výmenu sa vyrobí nový efemérny pár - vďaka nemu sa relácia nedá
+    // zrekonštruovať ani neskôr z dlhodobého kľúča zariadenia
+    uint8_t ephPriv[MessageCrypto::X25519_KEY_LEN];
+    uint8_t ephPub[MessageCrypto::X25519_KEY_LEN];
+    if (!MessageCrypto::generateEphemeralKeypair(ephPriv, ephPub)) return false;
 
     String contactKey = findContactKeyByMac(contacts, String(contactMac));
     if (contactKey.length() == 0) contactKey = String(contactMac);
+
+    // ID si zapamätáme, aby sme vedeli overiť, že prichádzajúci P_ACK_EXCH
+    // patrí k tejto našej žiadosti a nie je podvrhnutý cudzou stranou.
+    uint16_t exchangeId = nextControlMessageId();
+
     JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
     keys["status"] = "pending";
-    keys["x25519_own_pub"] = publicKeyHex;
+    keys["x25519_own_pub"] = staticPubHex;
+    keys["pending_id"] = exchangeId;
+    keys.remove("rekey_offer");
     saveContacts(contacts, "/m5pager/contacts.json");
 
-    return sendSinglePacket(P_INIT_EXCH, peerMac, publicKeyHex);
+    clearPendingExchange();
+    memcpy(pendingExchangeEphPriv, ephPriv, sizeof(pendingExchangeEphPriv));
+    pendingExchangeContact = contactKey;
+    pendingExchangeStartedMs = millis();
+    pendingExchangeValid = true;
+
+    String payload = staticPubHex + MessageCrypto::bytesToHex(ephPub, MessageCrypto::X25519_KEY_LEN);
+    Security::secureZero(ephPriv, sizeof(ephPriv));
+
+    bool sent = sendSinglePacket(P_INIT_EXCH, peerMac, payload, exchangeId);
+    if (!sent) clearPendingExchange();
+    return sent;
+}
+
+/// @brief Zruší nadviazanú reláciu s kontaktom (používa sa pred zámerným prekľúčovaním).
+/// @param contactKey Kľúč kontaktu
+void clearSession(const String& contactKey) {
+    if (!contacts.containsKey(contactKey)) return;
+    JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
+    keys["status"] = "none";
+    keys.remove("tx_chain");
+    keys.remove("rx_chain");
+    keys.remove("role");
+    keys.remove("fingerprint");
+    keys.remove("rekey_offer");
+    keys.remove("pending_id");
+
+    // Reťazce sa zahadzujú bez náhrady - staré kľúče správ sa už nedajú vyrobiť.
+    // Počítadlá netreba zachovávať: každý handshake má nové efemérne kľúče,
+    // takže nová relácia nikdy nepoužije rovnaké kľúče ako niektorá predošlá.
 }
 /// @brief Spracuje paket výmeny kľúčov.
 /// @param mac_addr MAC adresa odosielateľa
 /// @param pkt Paket
 void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) {
     String senderMac = macToString(mac_addr);
-    String contactKey = ensureContactKeyForMac(senderMac);
-    String peerPublicHex = packetPayloadToString(pkt);
+    String payload = packetPayloadToString(pkt);
 
     if (pkt.type == P_EXCH_OK) {
         return;
     }
 
-    bool ok = MessageCrypto::storePeerPublicAndSession(contacts, contactKey, peerPublicHex);
+    // Payload je statický aj efemérny verejný kľúč v hex tvare. Overíme ho skôr,
+    // než kvôli nemu čokoľvek založíme.
+    const size_t keyHexLen = MessageCrypto::X25519_KEY_LEN * 2;
+    if (payload.length() != keyHexLen * 2) return;
+
+    String peerPublicHex = payload.substring(0, keyHexLen);      //statický = identita
+    String peerEphemeralHex = payload.substring(keyHexLen);      //efemérny = forward secrecy
+
+    String contactKey = findContactKeyByMac(contacts, senderMac);
+    bool knownContact = contactKey.length() > 0;
+
+    if (pkt.type == P_ACK_EXCH) {
+        // Odpoveď uznáme len vtedy, ak sme výmenu sami začali a ID sedí s našou žiadosťou.
+        // Bez toho by hocikto mohol poslať nevyžiadaný P_ACK_EXCH a prepísať nám kľúč.
+        if (!knownContact) return;
+
+        JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
+        const char* status = keys["status"];
+        if (status == nullptr || strcmp(status, "pending") != 0) return;
+
+        uint16_t pendingId = keys["pending_id"] | 0;
+        if (pendingId == 0 || pendingId != pkt.message_id) return;
+
+        // Bez nášho efemérneho kľúča sa handshake dokončiť nedá
+        if (!pendingExchangeValid || !pendingExchangeContact.equalsIgnoreCase(contactKey)) return;
+        if (millis() - pendingExchangeStartedMs > KEY_EXCHANGE_TIMEOUT_MS) {
+            clearPendingExchange();
+            return;
+        }
+    } else {  // P_INIT_EXCH
+        if (knownContact && MessageCrypto::hasReadySession(contacts, contactKey)) {
+            // S týmto kontaktom už bezpečnú reláciu máme. Nevyžiadanú žiadosť o novú
+            // NEPRIJMEME automaticky - inak by stačilo podvrhnúť MAC kontaktu a kľúč
+            // by sa ticho vymenil za útočníkov. Ponuku iba odložíme na schválenie.
+            JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
+
+            // Zaznamenáme len prvú ponuku a ďalšie ignorujeme, kým ju používateľ
+            // nevybaví. Inak by opakovaný P_INIT_EXCH (zakaždým s iným kľúčom)
+            // vynucoval zápis na SD a blokujúci toast pri každom pakete.
+            if (keys["rekey_offer"].is<const char*>()) return;
+
+            keys["rekey_offer"] = peerPublicHex;
+            saveContacts(contacts, "/m5pager/contacts.json");
+
+            if (currentMenu == MENU_MESSAGE && senderMac.equalsIgnoreCase(selectedContact)) {
+                drawMessageMenu();
+                showErrorToast("Re-key requested - verify first", 1500);
+                drawMessageMenu();
+            }
+            return;
+        }
+
+        // Prvé spárovanie (TOFU) - kontakt vytvoríme až tu, keď je paket overený
+        if (!knownContact) contactKey = ensureContactKeyForMac(senderMac);
+    }
+
+    bool isInitiator = (pkt.type == P_ACK_EXCH);
+
+    // Iniciátor použije efemérny kľúč, ktorý si drží od odoslania žiadosti.
+    // Odpovedajúci si vyrobí vlastný až teraz a hneď po výpočte ho zahodí.
+    uint8_t ephPriv[MessageCrypto::X25519_KEY_LEN];
+    uint8_t ephPub[MessageCrypto::X25519_KEY_LEN];
+    String ownEphemeralHex;
+
+    if (isInitiator) {
+        memcpy(ephPriv, pendingExchangeEphPriv, sizeof(ephPriv));
+    } else {
+        if (!MessageCrypto::generateEphemeralKeypair(ephPriv, ephPub)) return;
+        ownEphemeralHex = MessageCrypto::bytesToHex(ephPub, MessageCrypto::X25519_KEY_LEN);
+    }
+
+    bool ok = MessageCrypto::completeHandshake(contacts, contactKey, peerPublicHex,
+                                               peerEphemeralHex, ephPriv, isInitiator);
+
+    // Efemérny súkromný kľúč už nikdy nebude potrebný - zahodením vzniká forward secrecy
+    Security::secureZero(ephPriv, sizeof(ephPriv));
+    if (isInitiator) clearPendingExchange();
+
     if (!ok) {
         JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
         keys["status"] = "error";
@@ -243,16 +422,19 @@ void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) 
 
     saveContacts(contacts, "/m5pager/contacts.json");
 
-    String ownPublicHex;
-    if (!MessageCrypto::getOwnPublicKeyHex(ownPublicHex)) return;
-
     if (pkt.type == P_INIT_EXCH) {
-        sendSinglePacket(P_ACK_EXCH, mac_addr, ownPublicHex, pkt.message_id);
+        String ownPublicHex;
+        if (!MessageCrypto::getOwnPublicKeyHex(ownPublicHex)) return;
+        sendSinglePacket(P_ACK_EXCH, mac_addr, ownPublicHex + ownEphemeralHex, pkt.message_id);
     } else if (pkt.type == P_ACK_EXCH) {
         sendSinglePacket(P_EXCH_OK, mac_addr, "", pkt.message_id);
     }
 
-    if (currentMenu == MENU_MESSAGE && selectedContact && senderMac.equalsIgnoreCase(selectedContact)) {
+    if (currentMenu == MENU_MESSAGE && senderMac.equalsIgnoreCase(selectedContact)) {
+        drawMessageMenu();
+        // Fingerprint si majitelia oboch zariadení musia porovnať mimo kanála,
+        // inak sa MITM pri prvom spárovaní nedá odhaliť.
+        showSuccessToast("Key: " + MessageCrypto::getSessionFingerprint(contacts, contactKey), 2000);
         drawMessageMenu();
     }
 }
@@ -270,14 +452,30 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 /// @param data Prijaté dáta
 /// @param data_len Dĺžka prijatých dát
 void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
-    const int headerSize = sizeof(MessageStruct) - MSG_CHUNK_SIZE;
-    if (data_len < headerSize || data_len > static_cast<int>(sizeof(MessageStruct))) return;
+    if (mac_addr == nullptr) return;
 
-    MessageStruct pkt{};
-    memcpy(&pkt, data, data_len);
+    // Formát paketu sa overí hneď tu - do fronty ide len to, čo je platné a konzistentné
+    MessageStruct pkt;
+    if (!deserializePacket(data, data_len, pkt)) return;
 
+    uint8_t next = (rxQueueTail + 1) % RX_QUEUE_SIZE;
+    if (next == rxQueueHead) return;  //fronta je plná, paket zahodíme
+
+    RxQueueItem& item = rxQueue[rxQueueTail];
+    memcpy(item.mac, mac_addr, 6);
+    item.pkt = pkt;
+
+    rxQueueTail = next;
+}
+
+/// @brief Spracuje jeden prijatý paket. Volá sa výhradne z loop(), nikdy z callbacku.
+/// @param mac_addr MAC adresa odosielateľa
+/// @param pkt Paket (už overený deserializePacket)
+void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
     if (pkt.type == P_MSG_ACK) {
-        if (awaitingAck && pkt.message_id == awaitingMsgId) {
+        // ACK uznáme len od toho, komu sme správu naozaj poslali. Inak by ľubovoľné
+        // zariadenie mohlo potvrdiť cudziu správu a označiť ju za doručenú.
+        if (awaitingAck && memcmp(mac_addr, awaitingMac, 6) == 0 && pkt.message_id == awaitingMsgId) {
             awaitingAck = false;
             if (pendingOutgoingReady) {
                 String contactKey = pendingOutgoingContact;
@@ -288,7 +486,6 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
                 pendingOutgoingText = "";
 
                 if (currentMenu == MENU_MESSAGE &&
-                    selectedContact &&
                     contactKey.equalsIgnoreCase(selectedContact)) {
                     drawMessageMenu();
                 }
@@ -303,30 +500,49 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     }
 
     if (pkt.type != P_MSG) return;
-    if (pkt.split_size == 0 || pkt.split_size > 32) return;
+    if (pkt.split_size == 0 || pkt.split_size > MAX_MESSAGE_PARTS) return;
     if (pkt.split_index >= pkt.split_size) return;
-    if (pkt.split_index >= 32) return;
 
-    int payloadLen = data_len - headerSize;
-    if (pkt.data_len > payloadLen || pkt.data_len > MSG_CHUNK_SIZE) return;
+    // Iba posledná časť smie byť kratšia. Vďaka tomu je offset každej časti
+    // jednoznačne split_index * MSG_CHUNK_SIZE a poradie príchodu nehrá rolu.
+    bool isLastPart = (pkt.split_index + 1 == pkt.split_size);
+    if (!isLastPart && pkt.data_len != MSG_CHUNK_SIZE) return;
+    if (isLastPart && pkt.data_len == 0) return;
+
+    unsigned long now = millis();
 
     if (pkt.split_index == 0) {
-        assembly = {};
+        // Nová správa - zostavovanie vždy začína časťou 0
+        resetAssembly(assembly);
+        assembly.active = true;
+        memcpy(assembly.from, mac_addr, 6);
         assembly.message_id = pkt.message_id;
         assembly.expected_parts = pkt.split_size;
-        assembly.data.reserve(pkt.split_size * MSG_CHUNK_SIZE);
+        assembly.lastPacketMs = now;
+    } else {
+        // Bez prijatej časti 0 nevieme, koľko častí čakať. Predtým sa taký paket prijal
+        // s expected_parts == 0, čo test úplnosti vyhodnotil ako hotovú správu -
+        // jediný podvrhnutý paket tak vedel založiť kontakt a vynútiť zápis na SD.
+        if (!assembly.active) return;
+        if (memcmp(assembly.from, mac_addr, 6) != 0) return;
+        if (pkt.message_id != assembly.message_id) return;
+        if (pkt.split_size != assembly.expected_parts) return;
+        if (now - assembly.lastPacketMs > ASSEMBLY_TIMEOUT_MS) {
+            resetAssembly(assembly);
+            return;
+        }
+        assembly.lastPacketMs = now;
     }
 
-    if (pkt.message_id != assembly.message_id) return;
+    if (pkt.split_index >= assembly.expected_parts) return;
 
     if (!assembly.received[pkt.split_index]) {
         assembly.received[pkt.split_index] = true;
-        for (uint8_t i = 0; i < pkt.data_len; i++) {
-            assembly.data += pkt.msg[i];
-        }
+        assembly.partLen[pkt.split_index] = pkt.data_len;
+        memcpy(assembly.data + (pkt.split_index * MSG_CHUNK_SIZE), pkt.msg, pkt.data_len);
     }
 
-    bool complete = true;
+    bool complete = assembly.expected_parts > 0;
     for (uint8_t i = 0; i < assembly.expected_parts; i++) {
         if (!assembly.received[i]) {
             complete = false;
@@ -334,27 +550,129 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
         }
     }
 
-    if (complete) {
-        sendMessageAck(mac_addr, pkt.message_id);
+    if (!complete) return;
 
-        String senderMac = macToString(mac_addr);
-        String contactKey = ensureContactKeyForMac(senderMac);
-        if (contactKey.length() > 0) {
-            String plaintext;
-            if (MessageCrypto::decryptPayload(contacts, contactKey, assembly.data, plaintext)) {
-                appendMessage(contacts, contactKey, "in", plaintext.c_str());
-            } else if (MessageCrypto::hasReadySession(contacts, contactKey)) {
-                appendMessage(contacts, contactKey, "in", "[Message decrypt failed]");
-            } else {
-                appendMessage(contacts, contactKey, "in", "[Encrypted message - key missing]");
-            }
-        }
+    // Všetky časti okrem poslednej sú plné, takže dáta ležia v buffri súvisle za sebou
+    size_t totalLen = 0;
+    for (uint8_t i = 0; i < assembly.expected_parts; i++) {
+        totalLen += assembly.partLen[i];
+    }
 
-        if (currentMenu == MENU_MESSAGE &&
-            selectedContact &&
-            senderMac.equalsIgnoreCase(selectedContact)) {
-            drawMessageMenu();
-        }
+    String senderMac = macToString(mac_addr);
+    String payload;
+    payload.reserve(totalLen);
+    for (size_t i = 0; i < totalLen; i++) {
+        payload += assembly.data[i];
+    }
+    resetAssembly(assembly);  //zostavovanie je hotové, stav zahodíme
+
+    // Správu od neznámeho odosielateľa zahodíme bez zápisu. Kontakt sa zakladá výhradne
+    // pri výmene kľúčov - inak by ľubovoľné zariadenie vedelo spoofnutými MAC adresami
+    // donekonečna zakladať kontakty a vynucovať zápisy na SD kartu.
+    String contactKey = findContactKeyByMac(contacts, senderMac);
+    if (contactKey.length() == 0) return;
+
+    sendMessageAck(mac_addr, pkt.message_id);
+
+    String plaintext;
+    if (MessageCrypto::decryptPayload(contacts, contactKey, payload, plaintext)) {
+        appendMessage(contacts, contactKey, "in", plaintext.c_str());
+    } else if (MessageCrypto::hasReadySession(contacts, contactKey)) {
+        appendMessage(contacts, contactKey, "in", "[Message decrypt failed]");
+    } else {
+        appendMessage(contacts, contactKey, "in", "[Encrypted message - key missing]");
+    }
+
+    if (currentMenu == MENU_MESSAGE && senderMac.equalsIgnoreCase(selectedContact)) {
+        drawMessageMenu();
+    }
+}
+
+/*
+
+ZAMYKANIE
+
+*/
+
+/// @brief Zamkne zariadenie - vymaže kľúče aj všetky dešifrované dáta z pamäte.
+void lockDevice() {
+    Security::lockRuntimeKeys();
+
+    // Samotné kľúče nestačia - v RAM ostáva história správ aj session kľúče kontaktov
+    contacts.clear();
+    config.clear();
+
+    selectedContact = "";
+    messageInput = "";
+    editContactName = "";
+    newUsername = "";
+    newWifiSsid = "";
+    newWifiPass = "";
+    isTypingMsg = false;
+    messageScroll = 0;
+
+    awaitingAck = false;
+    pendingOutgoingReady = false;
+    pendingOutgoingContact = "";
+    pendingOutgoingText = "";
+
+    // Zamknuté zariadenie nemá čím pakety dešifrovať, takže ich zahodíme
+    resetAssembly(assembly);
+    rxQueueHead = rxQueueTail;
+    clearPendingExchange();
+
+    currentMenu = MENU_MAIN;
+    menuIndex = 0;
+}
+
+/// @brief Vypýta si heslo a znovu načíta dáta. Blokuje, kým sa zariadenie neodomkne.
+/// @return TRUE, ak sa zariadenie podarilo odomknúť, inak FALSE
+bool unlockDevice() {
+    if (Security::ensureDevicePrivateKey() == DeviceKeyProvisionState::Error) {
+        return false;
+    }
+
+    M5Cardputer.Display.setTextScroll(true);
+    M5Cardputer.Display.setTextFont(2);
+    M5Cardputer.Display.setTextSize(0.75);
+    M5Cardputer.Display.fillScreen(TFT_BLACK);
+    M5Cardputer.Display.setCursor(0, 0);
+
+    if (!loadConfig(config, "/m5pager/config.json")) return false;
+    if (!loadContacts(contacts, "/m5pager/contacts.json")) return false;
+
+    user = config["username"] | "User";
+
+    // Čokoľvek, čo prišlo počas zámku, je už neaktuálne
+    rxQueueHead = rxQueueTail;
+    lastActivityMs = millis();
+
+    M5Cardputer.Display.setTextScroll(false);
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.fillScreen(uiBgColor());
+    M5Cardputer.Display.setCursor(0, 0);
+    M5Cardputer.Display.setTextColor(uiTextPrimaryColor(), uiBgColor());
+    menus[currentMenu].draw();
+    return true;
+}
+
+/// @brief Zamkne zariadenie a hneď vypýta heslo. Volá sa pri nečinnosti aj z nastavení.
+void lockAndPrompt() {
+    lockDevice();
+    if (!unlockDevice()) {
+        M5Cardputer.Display.setTextScroll(true);
+        M5Cardputer.Display.setCursor(0, 0);
+        M5Cardputer.Display.println("[-] FATAL: Unlock failed. Reboot device.");
+        while (true) delay(1000);
+    }
+}
+
+/// @brief Vyberie a spracuje všetky pakety odložené vo fronte. Volá sa z loop().
+void drainRxQueue() {
+    while (rxQueueHead != rxQueueTail) {
+        RxQueueItem& item = rxQueue[rxQueueHead];
+        processInboundPacket(item.mac, item.pkt);
+        rxQueueHead = (rxQueueHead + 1) % RX_QUEUE_SIZE;
     }
 }
 
@@ -384,7 +702,8 @@ void setup() {
   } else {
       M5Cardputer.Display.println("[+] Device private key loaded.");
   }
-  M5Cardputer.Display.println("[*] Key ID: " + Security::getDeviceKeyFingerprint());
+  // Fingerprint sa počíta z VEREJNÉHO kľúča (SHA-256), nikdy nie z privátneho
+  M5Cardputer.Display.println("[*] Key ID: " + MessageCrypto::getOwnPublicKeyFingerprint());
 
   spi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
 
@@ -393,26 +712,72 @@ void setup() {
 	  return;
   }
 
-  M5Cardputer.Display.println("[+] SD Card initialized.");  
+  M5Cardputer.Display.println("[+] SD Card initialized.");
+
+  // Config sa načíta ešte pred sieťou - sú v ňom prihlasovacie údaje siete
+  if (!loadConfig(config, "/m5pager/config.json")) {
+      M5Cardputer.Display.println("[-] FATAL: Failed to load config.");
+      return;
+  }
+  M5Cardputer.Display.println("[+] Config loaded.");
+
+  wifiSsid = config["wifi_ssid"] | DEFAULT_WIFI_SSID;
+  wifiPass = config["wifi_pass"] | "";
+
+  // Bez hesla by softAP() buď zlyhal, alebo vytvoril otvorenú sieť. Necháme si ho
+  // zadať hneď pri prvom štarte, meniť sa dá neskôr v Settings.
+  if (!isValidWifiPassword(wifiPass)) {
+      M5Cardputer.Display.println("[*] Network password not set.");
+      while (true) {
+          if (!Security::capturePassword("Set WiFi password", wifiPass, WIFI_PASS_MAX_LEN)) {
+              M5Cardputer.Display.println("[-] FATAL: No network password.");
+              return;
+          }
+          if (isValidWifiPassword(wifiPass)) break;
+          Security::showPasswordMessage("Min length is 8 chars", RED, 1200);
+      }
+
+      config["wifi_ssid"] = wifiSsid;
+      config["wifi_pass"] = wifiPass;
+      if (!saveConfig(config, "/m5pager/config.json")) {
+          M5Cardputer.Display.println("[-] FATAL: Failed to save network config.");
+          return;
+      }
+
+      // Výzva na heslo prekreslila obrazovku a prepla font - vrátime pôvodné nastavenie
+      M5Cardputer.Display.setTextFont(2);
+      M5Cardputer.Display.setTextSize(0.75);
+      M5Cardputer.Display.setTextScroll(true);
+      M5Cardputer.Display.setCursor(0, 0);
+      M5Cardputer.Display.println("[+] Network password saved.");
+  }
+
+  M5Cardputer.Display.println("[*] SSID: " + wifiSsid);
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.disconnect();
-  
-  if (ScanAP(ssid)) {
+
+  if (ScanAP(wifiSsid.c_str())) {
     M5Cardputer.Display.println("[+] Network exists. Connecting.");
-    WiFi.begin(ssid, password);
+    WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
     unsigned long connectStart = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - connectStart < 5000) {
       delay(100);
     }
     if (WiFi.status() != WL_CONNECTED) {
       M5Cardputer.Display.println("[!] Connect timeout. Creating AP.");
-      WiFi.softAP(ssid, password);
+      if (!WiFi.softAP(wifiSsid.c_str(), wifiPass.c_str())) {
+        M5Cardputer.Display.println("[-] FATAL: Could not start AP.");
+        return;
+      }
       isAP = true;
     }
   } else {
     M5Cardputer.Display.println("[+] Network not found. Creating.");
-    WiFi.softAP(ssid, password);
+    if (!WiFi.softAP(wifiSsid.c_str(), wifiPass.c_str())) {
+      M5Cardputer.Display.println("[-] FATAL: Could not start AP.");
+      return;
+    }
     isAP = true;
   }
 
@@ -435,12 +800,6 @@ void setup() {
       M5Cardputer.Display.println("[+] Contacts loaded.");
   }
 
-  if (!loadConfig(config, "/m5pager/config.json")) {
-      M5Cardputer.Display.println("[-] Failed to load config.");
-  } else {
-      M5Cardputer.Display.println("[+] Config loaded.");
-  }
-
   M5Cardputer.Display.println("[+] Setup complete.");
 
   delay(1000);
@@ -452,7 +811,7 @@ void setup() {
 
   //animácia privítania
   user = config["username"] | "User";
-  String welcomeMsg = "Welcome back, " + String(user) + "!\n";
+  String welcomeMsg = "Welcome back, " + user + "!\n";
   M5Cardputer.Display.setCursor(M5Cardputer.Display.width() / 2 - welcomeMsg.length() * 3, M5Cardputer.Display.height() / 2 - 4);
   for (size_t i = 0; i < welcomeMsg.length(); i++) {
       M5Cardputer.Display.print(welcomeMsg[i]);
@@ -460,6 +819,7 @@ void setup() {
   }
 
   delay(2000);
+  lastActivityMs = millis();
   menus[currentMenu].draw();
 }
 
@@ -467,6 +827,10 @@ MenuState previousMenu = MENU_MAIN;
 
 void loop() {
   M5Cardputer.update();
+
+  // Prijaté pakety sa spracúvajú tu, nie v ESP-NOW callbacku - JSON dokument,
+  // SD karta a displej sa tak používajú len z jedného tasku.
+  drainRxQueue();
 
   int key = 0;
 
@@ -484,8 +848,19 @@ void loop() {
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) key = KEY_BACKSPACE; //BACK
 
   if (key != 0) {
+      lastActivityMs = millis();
       menus[currentMenu].handleInput(key);
       delay(150);
+  }
+
+  if (millis() - lastActivityMs > IDLE_LOCK_TIMEOUT_MS) {
+      lockAndPrompt();
+      return;
+  }
+
+  // Nedokončená výmena kľúčov nesmie držať efemérny kľúč v pamäti donekonečna
+  if (pendingExchangeValid && millis() - pendingExchangeStartedMs > KEY_EXCHANGE_TIMEOUT_MS) {
+      clearPendingExchange();
   }
 
     //Ak nie je ACKed

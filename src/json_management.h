@@ -288,29 +288,30 @@ inline bool loadJsonEncryptedAware(DynamicJsonDocument& doc,
         return saveJsonEncrypted(doc, filename, label);
     }
 
+    // Súbor bez našej magic hlavičky nie je overený - nesmie sa načítať.
+    // Inak by stačilo hlavičku odstrániť a GCM tag by sa nikdy neoveril,
+    // čím by sa dal podstrčiť ľubovoľný obsah (vrátane cudzích session kľúčov).
     bool encrypted = (fileLen >= ENC_FILE_HEADER_LEN &&
                       memcmp(fileBytes, ENC_FILE_MAGIC, ENC_FILE_MAGIC_LEN) == 0);
-
-    uint8_t* jsonBytes = fileBytes;
-    size_t jsonLen = fileLen;
-    bool migratedFromPlaintext = false;
-
-    if (encrypted) {
-        uint8_t* decrypted = nullptr;
-        size_t decryptedLen = 0;
-        if (!decryptEncryptedBlob(fileBytes, fileLen, decrypted, decryptedLen)) {
-            free(fileBytes);
-            M5Cardputer.Display.print("[-] Failed to decrypt ");
-            M5Cardputer.Display.print(label);
-            M5Cardputer.Display.println(" file (wrong password or corrupted data).");
-            return false;
-        }
+    if (!encrypted) {
         free(fileBytes);
-        jsonBytes = decrypted;
-        jsonLen = decryptedLen;
-    } else {
-        migratedFromPlaintext = true;
+        M5Cardputer.Display.print("[-] ");
+        M5Cardputer.Display.print(label);
+        M5Cardputer.Display.println(" file is not encrypted - refusing to load.");
+        M5Cardputer.Display.println("    Delete or restore it from a trusted backup.");
+        return false;
     }
+
+    uint8_t* jsonBytes = nullptr;
+    size_t jsonLen = 0;
+    if (!decryptEncryptedBlob(fileBytes, fileLen, jsonBytes, jsonLen)) {
+        free(fileBytes);
+        M5Cardputer.Display.print("[-] Failed to decrypt ");
+        M5Cardputer.Display.print(label);
+        M5Cardputer.Display.println(" file (wrong password or tampered data).");
+        return false;
+    }
+    free(fileBytes);
 
     DeserializationError error = deserializeJson(doc, jsonBytes, jsonLen);
     free(jsonBytes);
@@ -320,15 +321,6 @@ inline bool loadJsonEncryptedAware(DynamicJsonDocument& doc,
         M5Cardputer.Display.print(": ");
         M5Cardputer.Display.println(error.c_str());
         return false;
-    }
-
-    if (migratedFromPlaintext) {
-        M5Cardputer.Display.print("[*] Migrating ");
-        M5Cardputer.Display.print(label);
-        M5Cardputer.Display.println(" to encrypted storage...");
-        if (!saveJsonEncrypted(doc, filename, label)) {
-            return false;
-        }
     }
 
     return true;
@@ -357,6 +349,8 @@ bool saveContacts(const DynamicJsonDocument &contacts, const char* filename) {
 /// @return TRUE, ak sa operácia podarila, inak FALSE
 bool loadConfig(DynamicJsonDocument &config, const char* filename) {
     M5Cardputer.Display.println("[*] Loading config...");
+    // wifi_ssid / wifi_pass sa tu zámerne nedopĺňajú - predvolené SSID drží
+    // DEFAULT_WIFI_SSID a heslo siete si musí zadať používateľ pri prvom štarte.
     if (!loadJsonEncryptedAware(config, filename, "config", "{\"username\":\"User\"}")) {
         return false;
     }

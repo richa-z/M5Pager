@@ -27,7 +27,24 @@ constexpr size_t PASSWORD_SALT_LEN = 16;
 constexpr size_t FILESYSTEM_SALT_LEN = 16;
 constexpr size_t GCM_IV_LEN = 12;
 constexpr size_t GCM_TAG_LEN = 16;
-constexpr uint32_t PASSWORD_KDF_ITERATIONS = 60000;
+constexpr uint32_t PASSWORD_KDF_ITERATIONS = 200000;
+
+// Politika hesla. NVS nie je šifrované, takže wrapnutý kľúč sa dá z flashu vytiahnuť
+// a heslo lámať offline - dĺžka a zloženie hesla sú jediná reálna obrana.
+//
+// Povoľujeme dve cesty: krátke heslo musí miešať triedy znakov, dostatočne dlhá
+// fráza nemusí. Fráza zo štyroch-piatich bežných slov má oveľa vyššiu entropiu než
+// desaťznakové "heslo s číslicou", hoci vyzerá jednoduchšie.
+constexpr size_t PASSWORD_MIN_LEN = 10;
+constexpr size_t PASSPHRASE_MIN_LEN = 20;
+constexpr size_t PASSWORD_MAX_LEN = 64;
+
+// Koľko hviezdičiek sa zmestí na displej - dlhšie heslo sa zobrazí skrátene s počtom
+constexpr size_t PASSWORD_MASK_DISPLAY_MAX = 22;
+
+// Po koľkých neúspešných pokusoch začneme spomaľovať a aký je strop čakania (sekundy)
+constexpr uint32_t PASSWORD_FREE_ATTEMPTS = 3;
+constexpr uint32_t PASSWORD_MAX_BACKOFF_S = 60;
 
 // Názvy pre NVS kľúče a namespace
 constexpr const char* DEVICE_KEY_NAMESPACE = "crypto";
@@ -39,6 +56,7 @@ constexpr const char* WRAP_IV_KEY = "sk_iv";
 constexpr const char* WRAP_TAG_KEY = "sk_tag";
 constexpr const char* WRAP_CIPHERTEXT_KEY = "sk_ct";
 constexpr const char* FILESYSTEM_SALT_KEY = "fs_salt";
+constexpr const char* PASSWORD_FAIL_KEY = "pw_fails";
 
 // Konštanty pre kontexty a AAD v kryptografických operáciách
 constexpr char KEY_WRAP_AAD[] = "M5PAGER_SK_WRAP_V1";
@@ -248,10 +266,20 @@ inline bool deriveFilesystemKey(const uint8_t privateKey[DEVICE_PRIVATE_KEY_LEN]
 /// @param password Heslo
 /// @return Skryté heslo (***)
 inline String maskPassword(const String& password) {
+    size_t len = password.length();
+    size_t shown = len > PASSWORD_MASK_DISPLAY_MAX ? PASSWORD_MASK_DISPLAY_MAX : len;
+
     String masked = "";
-    masked.reserve(password.length());
-    for (size_t i = 0; i < password.length(); i++) {
+    masked.reserve(shown + 8);
+    for (size_t i = 0; i < shown; i++) {
         masked += '*';
+    }
+
+    // Dlhá fráza by sa cez displej nezmestila - zvyšok zhrnieme počtom znakov
+    if (len > shown) {
+        masked += "(";
+        masked += String(static_cast<unsigned>(len));
+        masked += ")";
     }
     return masked;
 }
@@ -374,6 +402,76 @@ inline bool capturePassword(const char* title, String& outPassword, size_t maxLe
     }
 }
 
+/// @brief Skontroluje, či heslo spĺňa minimálnu politiku (dĺžka + aspoň dve triedy znakov).
+/// @param password Heslo
+/// @param outReason Dôvod zamietnutia (výstup, len ak funkcia vráti FALSE)
+/// @return TRUE, ak heslo vyhovuje, inak FALSE
+inline bool isPasswordAcceptable(const String& password, const char*& outReason) {
+    // Dlhá fráza je sama o sebe dosť silná, zloženie znakov neriešime
+    if (password.length() >= PASSPHRASE_MIN_LEN) {
+        outReason = nullptr;
+        return true;
+    }
+
+    if (password.length() < PASSWORD_MIN_LEN) {
+        outReason = "Use 10+ chars or a phrase";
+        return false;
+    }
+
+    bool hasLetter = false;
+    bool hasDigit = false;
+    bool hasSymbol = false;
+    for (size_t i = 0; i < password.length(); i++) {
+        char c = password[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) hasLetter = true;
+        else if (c >= '0' && c <= '9') hasDigit = true;
+        else hasSymbol = true;
+    }
+
+    if (!(hasLetter && (hasDigit || hasSymbol))) {
+        outReason = "Add a digit, or use a phrase";
+        return false;
+    }
+
+    outReason = nullptr;
+    return true;
+}
+
+/// @brief Načíta počet neúspešných pokusov o odomknutie z NVS.
+/// @param handle NVS handle
+/// @return Počet neúspešných pokusov (0, ak záznam neexistuje)
+inline uint32_t readFailedAttempts(nvs_handle_t handle) {
+    uint32_t fails = 0;
+    if (nvs_get_u32(handle, PASSWORD_FAIL_KEY, &fails) != ESP_OK) return 0;
+    return fails;
+}
+
+/// @brief Uloží počet neúspešných pokusov o odomknutie do NVS.
+/// @param handle NVS handle
+/// @param fails Počet neúspešných pokusov
+inline void writeFailedAttempts(nvs_handle_t handle, uint32_t fails) {
+    if (nvs_set_u32(handle, PASSWORD_FAIL_KEY, fails) == ESP_OK) {
+        nvs_commit(handle);
+    }
+}
+
+/// @brief Počká podľa počtu doterajších neúspešných pokusov (exponenciálny backoff).
+/// @param fails Počet neúspešných pokusov
+inline void applyUnlockBackoff(uint32_t fails) {
+    if (fails <= PASSWORD_FREE_ATTEMPTS) return;
+
+    uint32_t shift = fails - PASSWORD_FREE_ATTEMPTS - 1;
+    if (shift > 6) shift = 6;
+    uint32_t waitSeconds = 1UL << shift;
+    if (waitSeconds > PASSWORD_MAX_BACKOFF_S) waitSeconds = PASSWORD_MAX_BACKOFF_S;
+
+    for (uint32_t remaining = waitSeconds; remaining > 0; remaining--) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Locked out - %lus", static_cast<unsigned long>(remaining));
+        showPasswordMessage(buf, RED, 1000);
+    }
+}
+
 /// @brief Vytvorí runtime kľúče z privátneho kľúča a soli.
 /// @param privateKey Privátny kľúč zariadenia
 /// @param fsSalt Soľ pro odvodenie kľúča pre súborový systém
@@ -413,15 +511,16 @@ inline bool setupPasswordProtection(nvs_handle_t handle,
     String passwordConfirm;
 
     while (true) {
-        if (!capturePassword("Set unlock password", password)) {
+        if (!capturePassword("Set unlock password", password, PASSWORD_MAX_LEN)) {
             return false;
         }
-        if (password.length() < 6) {
-            showPasswordMessage("Min length is 6 chars", RED, 1000);
+        const char* reason = nullptr;
+        if (!isPasswordAcceptable(password, reason)) {
+            showPasswordMessage(reason, RED, 1200);
             continue;
         }
 
-        if (!capturePassword("Confirm password", passwordConfirm)) {
+        if (!capturePassword("Confirm password", passwordConfirm, PASSWORD_MAX_LEN)) {
             return false;
         }
         if (password != passwordConfirm) {
@@ -529,8 +628,13 @@ inline bool unlockExistingKey(nvs_handle_t handle) {
     uint8_t wrapKey[PASSWORD_WRAP_KEY_LEN];
     uint8_t privateKey[DEVICE_PRIVATE_KEY_LEN];
 
+    // Počítadlo prežije reboot, takže vypnutím zariadenia sa backoff neobíde
+    uint32_t failedAttempts = readFailedAttempts(handle);
+
     while (true) {
-        if (!capturePassword("Unlock data", password)) {
+        applyUnlockBackoff(failedAttempts);
+
+        if (!capturePassword("Unlock data", password, PASSWORD_MAX_LEN)) {
             secureZero(passwordSalt, PASSWORD_SALT_LEN);
             secureZero(fsSalt, FILESYSTEM_SALT_LEN);
             secureZero(wrapIv, GCM_IV_LEN);
@@ -558,9 +662,17 @@ inline bool unlockExistingKey(nvs_handle_t handle) {
 
         if (!ok) {
             secureZero(privateKey, DEVICE_PRIVATE_KEY_LEN);
-            showPasswordMessage("Wrong password", RED, 1200);
+            failedAttempts++;
+            writeFailedAttempts(handle, failedAttempts);
+
+            char buf[40];
+            snprintf(buf, sizeof(buf), "Wrong password (%lu failed)",
+                     static_cast<unsigned long>(failedAttempts));
+            showPasswordMessage(buf, RED, 1200);
             continue;
         }
+
+        writeFailedAttempts(handle, 0);
 
         bool runtimeOk = buildRuntimeKeys(privateKey, fsSalt, DeviceKeyProvisionState::LoadedExisting);
         secureZero(privateKey, DEVICE_PRIVATE_KEY_LEN);
@@ -571,19 +683,6 @@ inline bool unlockExistingKey(nvs_handle_t handle) {
         secureZero(wrappedPrivateKey, DEVICE_PRIVATE_KEY_LEN);
         return runtimeOk;
     }
-}
-
-/// @brief Vypočíta FNV-1a 32-bit hash.
-/// @param data Pointer na dáta, z ktorých sa má hash vypočítať
-/// @param len Dĺžka dát
-/// @return Vypočítaný hash
-inline uint32_t fnv1a32(const uint8_t* data, size_t len) {
-    uint32_t hash = 2166136261UL;
-    for (size_t i = 0; i < len; i++) {
-        hash ^= data[i];
-        hash *= 16777619UL;
-    }
-    return hash;
 }
 
 /// @brief Zaručí existenciu privátneho kľúča zariadenia.
@@ -639,6 +738,17 @@ inline DeviceKeyProvisionState ensureDevicePrivateKey() {
         runtime.filesystemReady = false;
     }
     return runtime.state;
+}
+
+/// @brief Zamkne zariadenie - vymaže kľúče z RAM.
+/// @note Po zavolaní vráti ensureDevicePrivateKey() zariadenie do stavu pýtania hesla,
+///       pretože kontroluje práve príznak ready.
+inline void lockRuntimeKeys() {
+    DeviceKeyRuntime& runtime = deviceKeyRuntime();
+    secureZero(runtime.privateKey, DEVICE_PRIVATE_KEY_LEN);
+    secureZero(runtime.filesystemKey, FILESYSTEM_KEY_LEN);
+    runtime.ready = false;
+    runtime.filesystemReady = false;
 }
 
 /// @brief Skontroluje, či existuje privátny kľúč zariadenia.
@@ -722,20 +832,6 @@ inline bool decryptFilesystemBuffer(const uint8_t* ciphertext,
                          iv,
                          tag,
                          plaintext);
-}
-
-/// @brief Získá fingerprint privátneho kľúča zariadenia.
-/// @return Fingerprint privátneho kľúča zariadenia, alebo "UNSET", ak kľúč není k dispozicii
-inline String getDeviceKeyFingerprint() {
-    const DeviceKeyRuntime& runtime = deviceKeyRuntime();
-    if (!runtime.ready) {
-        return "UNSET";
-    }
-
-    uint32_t fingerprint = fnv1a32(runtime.privateKey, DEVICE_PRIVATE_KEY_LEN);
-    char out[9];
-    snprintf(out, sizeof(out), "%08lX", static_cast<unsigned long>(fingerprint));
-    return String(out);
 }
 
 }

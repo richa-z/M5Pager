@@ -14,14 +14,15 @@
 
 extern MenuState currentMenu;
 extern int menuIndex;
-extern const char* selectedContact;
+extern String selectedContact;
 extern DynamicJsonDocument contacts;
 extern bool isTypingMsg;
-extern String messageInput; 
+extern String messageInput;
 extern uint8_t selectedMac[6];
 
 extern bool awaitingAck;
 extern uint16_t awaitingMsgId;
+extern uint8_t awaitingMac[6];
 extern unsigned long sendTimestamp;
 extern bool pendingOutgoingReady;
 extern String pendingOutgoingContact;
@@ -133,7 +134,7 @@ int countWrappedTextRows(const String& text,
 /// @brief Vráti maximálny počet riadkov, o ktoré je možné posunúť chat.
 /// @return Maximálny počet riadkov pre posunutie chatu.
 int getMaxMessageScroll() {
-    if (selectedContact == nullptr) return 0;
+    if (selectedContact.length() == 0) return 0;
     if (!contacts.containsKey(selectedContact)) return 0;
 
     JsonArray messages = contacts[selectedContact]["messages"];
@@ -174,15 +175,25 @@ uint16_t sendSplitMessage(const uint8_t* targetMac, const String& contactKey, co
         return 0;
     }
 
-    messageCounter++;
+    // Poradové číslo musí byť na disku skôr, než správu odošleme. Keby sme zariadenie
+    // vypli medzi odoslaním a uložením, po štarte by sme číslo použili znovu a
+    // protistrana by nám všetky ďalšie správy zahadzovala ako replay.
+    if (!saveContacts(contacts, "/m5pager/contacts.json")) {
+        return 0;
+    }
+
+    // Dátové ID nikdy nemá nastavený najvyšší bit - ten je vyhradený pre kontrolné pakety
+    messageCounter = (messageCounter + 1) & MESSAGE_ID_VALUE_MASK;
+    if (messageCounter == 0) messageCounter = 1;
 
     uint16_t msgId = messageCounter;
     int totalLen = encryptedPayload.length();
     uint8_t totalParts = (totalLen + MSG_CHUNK_SIZE - 1) / MSG_CHUNK_SIZE;
-    if (totalParts == 0 || totalParts > 32) return 0;
+    if (totalParts == 0 || totalParts > MAX_MESSAGE_PARTS) return 0;
 
     awaitingAck = true;
     awaitingMsgId = msgId;
+    memcpy(awaitingMac, targetMac, 6);  //ACK uznáme len od tohto príjemcu
     sendTimestamp = millis();
     pendingOutgoingReady = true;
     pendingOutgoingContact = contactKey;
@@ -201,7 +212,17 @@ uint16_t sendSplitMessage(const uint8_t* targetMac, const String& contactKey, co
         pkt.data_len = min(MSG_CHUNK_SIZE, totalLen - offset);
         memcpy(pkt.msg, encryptedPayload.c_str() + offset, pkt.data_len);
 
-        esp_err_t sendResult = esp_now_send(targetMac, (uint8_t*)&pkt, sizeof(MessageStruct) - MSG_CHUNK_SIZE + pkt.data_len);
+        uint8_t wire[PACKET_MAX_LEN];
+        size_t wireLen = serializePacket(pkt, wire);
+        if (wireLen == 0) {
+            awaitingAck = false;
+            pendingOutgoingReady = false;
+            pendingOutgoingContact = "";
+            pendingOutgoingText = "";
+            return 0;
+        }
+
+        esp_err_t sendResult = esp_now_send(targetMac, wire, wireLen);
         if (sendResult != ESP_OK) {
             awaitingAck = false;
             pendingOutgoingReady = false;
@@ -324,15 +345,25 @@ void drawMessageMenu() {
     beginScreenFrame();
     drawSectionTitle("CHAT");
 
-    if (selectedContact == nullptr || !contacts.containsKey(selectedContact)) {
+    if (selectedContact.length() == 0 || !contacts.containsKey(selectedContact)) {
         drawHintLine("No contact selected", UI_CONTENT_TOP_Y + 24, uiTextMutedColor());
         currentMenu = MENU_CONTACTS;
         return;
     }
 
-    bool secureReady = MessageCrypto::hasReadySession(contacts, String(selectedContact));
-    String person = String(contacts[selectedContact]["username"].as<const char*>());
-    drawInputCard(secureReady ? "Secure conversation" : "Key exchange needed", person, "-", CHAT_HEADER_Y, CHAT_HEADER_H);
+    bool secureReady = MessageCrypto::hasReadySession(contacts, selectedContact);
+    bool rekeyPending = MessageCrypto::hasPendingRekeyOffer(contacts, selectedContact);
+    String person = contacts[selectedContact]["username"] | "";
+
+    String headerLabel;
+    if (rekeyPending) {
+        headerLabel = "Re-key requested - verify!";
+    } else if (secureReady) {
+        headerLabel = "Secure - " + MessageCrypto::getSessionFingerprint(contacts, selectedContact);
+    } else {
+        headerLabel = "Key exchange needed";
+    }
+    drawInputCard(headerLabel, person, "-", CHAT_HEADER_Y, CHAT_HEADER_H);
 
     JsonArray messages = contacts[selectedContact]["messages"];
     int totalMessages = messages.size();
@@ -439,8 +470,8 @@ void handleMessageInput(int key) {
     }
 
     if (!isTypingMsg && key == KEY_ENTER) {
-        if (!MessageCrypto::hasReadySession(contacts, String(selectedContact))) {
-            if (requestKeyExchange(selectedContact)) {
+        if (!MessageCrypto::hasReadySession(contacts, selectedContact)) {
+            if (requestKeyExchange(selectedContact.c_str())) {
                 showSuccessToast("Key exchange started", 700);
             } else {
                 showErrorToast("Key exchange failed");
@@ -458,7 +489,7 @@ void handleMessageInput(int key) {
         if (key == KEY_ENTER) {
             if (messageInput.length() == 0) return;
 
-            if (!selectContactPeer(selectedContact)) {
+            if (!selectContactPeer(selectedContact.c_str())) {
                 drawMessageMenu();
                 showErrorToast("Invalid peer MAC");
                 isTypingMsg = false;
@@ -466,8 +497,8 @@ void handleMessageInput(int key) {
                 return;
             }
 
-            if (!MessageCrypto::hasReadySession(contacts, String(selectedContact))) {
-                if (requestKeyExchange(selectedContact)) {
+            if (!MessageCrypto::hasReadySession(contacts, selectedContact)) {
+                if (requestKeyExchange(selectedContact.c_str())) {
                     showSuccessToast("Key exchange started", 700);
                 } else {
                     showErrorToast("Key exchange failed");
@@ -476,7 +507,7 @@ void handleMessageInput(int key) {
                 return;
             }
 
-            uint16_t msgId = sendSplitMessage(selectedMac, String(selectedContact), messageInput);
+            uint16_t msgId = sendSplitMessage(selectedMac, selectedContact, messageInput);
             if (msgId == 0) {
                 drawMessageMenu();
                 showErrorToast("Send failed");
@@ -497,7 +528,7 @@ void handleMessageInput(int key) {
             return;
         }
         
-        if (handleTextInput(key, messageInput, 180)) {
+        if (handleTextInput(key, messageInput, MAX_MESSAGE_TEXT_LEN)) {
             drawMessageMenu();
         }
     }

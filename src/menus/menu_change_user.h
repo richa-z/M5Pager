@@ -10,7 +10,7 @@
 extern MenuState currentMenu;
 extern DynamicJsonDocument config;
 extern int menuIndex;
-extern const char* user;
+extern String user;
 String newUsername = "";
 
 void drawChangeUsername() {
@@ -28,7 +28,7 @@ void handleChangeUsernameInput(int key) {
             return;
         }
 
-        config["username"] = newUsername.c_str();
+        config["username"] = newUsername;
         if (!saveConfig(config, "/m5pager/config.json")) {
             drawChangeUsername();
             showErrorToast("Failed to save config");
@@ -38,7 +38,7 @@ void handleChangeUsernameInput(int key) {
             showSuccessToast("Username saved", 700);
         }
         menuIndex = 0;
-        user = newUsername.c_str();
+        user = newUsername;  //kópia, nie ukazovateľ do buffera, ktorý hneď vyprázdnime
         newUsername = "";
         currentMenu = MENU_SETTINGS;
         return;

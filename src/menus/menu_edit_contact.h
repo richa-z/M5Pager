@@ -10,7 +10,7 @@
 extern MenuState currentMenu;
 extern DynamicJsonDocument contacts;
 extern String editContactName;
-extern const char* selectedContact;
+extern String selectedContact;
 
 
 void drawEditContact() {

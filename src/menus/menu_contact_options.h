@@ -8,10 +8,11 @@
 
 extern MenuState currentMenu;
 extern int menuIndex;
-extern const char* selectedContact;
+extern String selectedContact;
 extern DynamicJsonDocument contacts;
 extern String editContactName;
 bool requestKeyExchange(const char* contactMac);
+void clearSession(const String& contactKey);
 
 const char* contactOptions[] = {
     "Start Key Exchange",
@@ -28,12 +29,18 @@ void drawContactOptions() {
     drawSectionTitle("CONTACT");
 
     String contactName = "Unknown";
-    if (selectedContact != nullptr && contacts.containsKey(selectedContact)) {
-        contactName = contacts[selectedContact]["username"].as<const char*>();
+    if (selectedContact.length() > 0 && contacts.containsKey(selectedContact)) {
+        contactName = contacts[selectedContact]["username"] | "Unknown";
     }
-    String keyLabel = MessageCrypto::hasReadySession(contacts, String(selectedContact))
-                          ? "Selected contact - secure"
-                          : "Selected contact - no key";
+
+    String keyLabel;
+    if (MessageCrypto::hasPendingRekeyOffer(contacts, selectedContact)) {
+        keyLabel = "Re-key requested - verify!";
+    } else if (MessageCrypto::hasReadySession(contacts, selectedContact)) {
+        keyLabel = "Secure - " + MessageCrypto::getSessionFingerprint(contacts, selectedContact);
+    } else {
+        keyLabel = "Selected contact - no key";
+    }
     drawInputCard(keyLabel, contactName, "-", UI_CONTENT_TOP_Y + 14, 24);
 
     const int optionStartY = UI_CONTENT_TOP_Y + 38;
@@ -68,7 +75,10 @@ void handleContactOptionsInput(int key) {
     if (key == KEY_ENTER) {
         switch (menuIndex) {
             case 0: // Start key exchange
-                if (requestKeyExchange(selectedContact)) {
+                // Existujúcu reláciu zahodíme len tu, na vedomý pokyn používateľa.
+                // Prichádzajúci paket ju prepísať nesmie (pozri handleKeyExchangePacket).
+                clearSession(selectedContact);
+                if (requestKeyExchange(selectedContact.c_str())) {
                     drawContactOptions();
                     showSuccessToast("Key exchange started", 700);
                 } else {
@@ -78,14 +88,14 @@ void handleContactOptionsInput(int key) {
                 break;
 
             case 1: // Edit name
-                editContactName = contacts[selectedContact]["username"].as<String>();
+                editContactName = contacts[selectedContact]["username"] | "";
                 currentMenu = MENU_EDIT_CONTACT;
                 break;
 
             case 2: // Delete
                 contacts.remove(selectedContact);
                 saveContacts(contacts, "/m5pager/contacts.json");
-                selectedContact = nullptr;
+                selectedContact = "";
                 currentMenu = MENU_CONTACTS;
                 break;
 

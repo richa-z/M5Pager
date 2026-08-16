@@ -14,10 +14,18 @@ extern MenuState currentMenu; //Aktuálna ponuka pre input tracking
 extern int contactsSize;
 
 extern DynamicJsonDocument config; //globálny config dokument
-extern const char* user;
-const char* settingsItems[] = {
-    "Username",
-    "MAC: " //read-only
+
+// Vlastnená kópia. Ukazovateľ do JSON dokumentu alebo do iného Stringu tu byť nesmie -
+// obe úložiská sa prepisujú a ukazovateľ by ostal visieť.
+extern String user;
+// Poradie musí sedieť s handleSettingsMenuInput()
+enum SettingsRow {
+    SETTINGS_USERNAME = 0,
+    SETTINGS_WIFI_SSID,
+    SETTINGS_WIFI_PASS,
+    SETTINGS_LOCK,
+    SETTINGS_MAC,        //read-only
+    SETTINGS_COUNT
 };
 
 extern int messageScroll;
@@ -28,6 +36,10 @@ constexpr int UI_TOPBAR_TEXT_Y = 2;
 constexpr int UI_CONTENT_TOP_Y = UI_TOPBAR_HEIGHT + 2;
 constexpr int UI_CARD_GAP = 4;
 constexpr int UI_CARD_HEIGHT = 18;
+
+// Strop histórie na kontakt. Dokument kontaktov má pevnú veľkosť, takže bez stropu
+// sa dá zaplniť pool (aj vzdialene) a ďalšie zápisy potichu zlyhávajú.
+constexpr size_t MAX_MESSAGES_PER_CONTACT = 40;
 
 inline uint16_t uiBgColor() { return M5Cardputer.Display.color565(8, 10, 14); }
 inline uint16_t uiTopbarColor() { return M5Cardputer.Display.color565(14, 18, 24); }
@@ -86,9 +98,9 @@ inline String getTopbarTimeText() {
 /// @brief Získa užívateľské meno pre hornú lištu.
 /// @return Užívateľské meno v reťazci
 inline String getTopbarUsernameText() {
-    const char* cfgUser = config["username"];
-    if (cfgUser != nullptr && cfgUser[0] != '\0') return String(cfgUser);
-    if (user != nullptr && user[0] != '\0') return String(user);
+    String cfgUser = config["username"] | "";
+    if (cfgUser.length() > 0) return cfgUser;
+    if (user.length() > 0) return user;
     return "User";
 }
 
@@ -300,25 +312,25 @@ inline void drawMenu(const char* items[], int itemCount, int selectedIdx = 0) {
 /// @brief Nakreslí zoznam kontaktov.
 /// @param contacts JSON dokument obsahujúci kontakty
 /// @param selectedIdx Index vybratého kontaktu
-/// @return Ukazovateľ na vybratý kontakt
-const char* drawContacts(DynamicJsonDocument& contacts, int selectedIdx = 0) {
+/// @return Kľúč vybratého kontaktu (vlastnená kópia, nie ukazovateľ do dokumentu)
+String drawContacts(DynamicJsonDocument& contacts, int selectedIdx = 0) {
     beginScreenFrame();
     drawSectionTitle("CONTACTS");
 
     //meno je kluc
     int counter = 0;
     int contactCount = 0;
-    const char* temp = nullptr;
+    String temp = "";
     for (JsonPair kvp : contacts.as<JsonObject>()) {
         contactCount++;
     }
 
     for (JsonPair kvp : contacts.as<JsonObject>()) {
         if (counter == selectedIdx) {
-            temp = kvp.key().c_str();
+            temp = String(kvp.key().c_str());
         }
-        const char* name = kvp.value()["username"];
-        drawCardRow(String(name), counter, counter == selectedIdx);
+        String name = kvp.value()["username"] | "";
+        drawCardRow(name, counter, counter == selectedIdx);
         counter++;
     }
 
@@ -336,10 +348,10 @@ const char* drawContacts(DynamicJsonDocument& contacts, int selectedIdx = 0) {
 /// @brief Nakreslí správy pre vybratý kontakt.
 /// @param contactsJson JSON dokument obsahujúci kontakty a ich správy
 /// @param selectedContact Meno vybratého kontaktu
-void drawMessages(DynamicJsonDocument& contactsJson, const char* selectedContact) {
+void drawMessages(DynamicJsonDocument& contactsJson, const String& selectedContact) {
     beginScreenFrame();
 
-    if (selectedContact != nullptr) {
+    if (selectedContact.length() > 0) {
         String person = String(contactsJson[selectedContact]["username"].as<const char*>());
         M5Cardputer.Display.setTextColor(uiTextPrimaryColor(), uiBgColor());
         M5Cardputer.Display.println(person);
@@ -356,10 +368,10 @@ void drawMessages(DynamicJsonDocument& contactsJson, const char* selectedContact
 
             for (int i = start; i < end; i++) {
                 JsonObject msg = messages[i];
-                const char* who = msg["type"] == "in" ? person.c_str() : user;
                 bool incoming = String(msg["type"].as<const char*>()) == "in";
+                String who = incoming ? person : user;
                 M5Cardputer.Display.setTextColor(incoming ? uiTextMutedColor() : uiTextPrimaryColor(), uiBgColor());
-                M5Cardputer.Display.println((incoming ? "< " : "> ") + String(who) + ": " + msg["text"].as<String>());
+                M5Cardputer.Display.println((incoming ? "< " : "> ") + who + ": " + msg["text"].as<String>());
             }
         } else {
             M5Cardputer.Display.setTextColor(uiTextMutedColor(), uiBgColor());
@@ -392,22 +404,32 @@ void drawSettings(int selectedIdx = 0) {
     beginScreenFrame();
     drawSectionTitle("SETTINGS");
 
-    for (size_t i = 0; i < 2; i++) {
+    user = config["username"] | "User";
+    String wifiSsid = config["wifi_ssid"] | "";
+    String wifiPass = config["wifi_pass"] | "";
+
+    // Heslo siete sa v zozname nikdy nevypisuje - je viditeľné len pri jeho úprave
+    String maskedPass;
+    for (size_t i = 0; i < wifiPass.length(); i++) maskedPass += '*';
+
+    for (int i = 0; i < SETTINGS_COUNT; i++) {
         String rowText;
-        if (strcmp(settingsItems[i], "Username") == 0) {
-
-            if (user == nullptr) {
-                user = "NULLPTR";
-            } else {
-                user = config["username"];
-            }
-
-            rowText = String("Username: ") + String(user);
-            
-        } else if (strcmp(settingsItems[i], "MAC: ") == 0) {
-            rowText = settingsItems[i] + WiFi.macAddress();
-        } else {
-            rowText = settingsItems[i];
+        switch (i) {
+            case SETTINGS_USERNAME:
+                rowText = "Username: " + user;
+                break;
+            case SETTINGS_WIFI_SSID:
+                rowText = "WiFi SSID: " + (wifiSsid.length() > 0 ? wifiSsid : String("<not set>"));
+                break;
+            case SETTINGS_WIFI_PASS:
+                rowText = "WiFi Pass: " + (maskedPass.length() > 0 ? maskedPass : String("<not set>"));
+                break;
+            case SETTINGS_LOCK:
+                rowText = "Lock device now";
+                break;
+            case SETTINGS_MAC:
+                rowText = "MAC: " + WiFi.macAddress();
+                break;
         }
         drawCardRow(rowText, i, i == selectedIdx);
     }
@@ -438,9 +460,24 @@ bool appendMessage(DynamicJsonDocument& contacts, const String& contactKey, cons
     }
 
     JsonArray messages = contact["messages"].as<JsonArray>();
+
+    // História je limitovaná veľkosťou dokumentu - najstaršie správy zahadzujeme,
+    // inak sa pool ticho zaplní a ArduinoJson prestane zapisovať bez chyby.
+    while (messages.size() >= MAX_MESSAGES_PER_CONTACT) {
+        messages.remove(0);
+    }
+
     JsonObject msg = messages.createNestedObject();
+    if (msg.isNull()) return false;
+
     msg["type"] = direction;
     msg["text"] = text;
+
+    if (contacts.overflowed()) {
+        // Zápis sa nevošiel do poolu - správu radšej odstránime, než by sme uložili polovičný záznam
+        messages.remove(messages.size() - 1);
+        return false;
+    }
 
     return saveContacts(contacts, "/m5pager/contacts.json");
 }

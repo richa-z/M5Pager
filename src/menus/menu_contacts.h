@@ -5,7 +5,7 @@
 
 extern DynamicJsonDocument contacts;
 extern int menuIndex;
-extern const char* selectedContact;
+extern String selectedContact;
 bool selectContactPeer(const char* contactMac);
 
 void drawContactsMenu() {
@@ -29,10 +29,10 @@ void handleContactsMenuInput(int key) {
         drawContactsMenu();
     }
     else if (key == KEY_ENTER) {
-        if (selectedContact == nullptr)  return;
+        if (selectedContact.length() == 0) return;
 
-        if (strcmp(selectedContact, "ADD_CONTACT_BTN") != 0) {
-            if (!selectContactPeer(selectedContact)) {
+        if (selectedContact != "ADD_CONTACT_BTN") {
+            if (!selectContactPeer(selectedContact.c_str())) {
                 drawContactsMenu();
                 showErrorToast("Invalid contact MAC");
                 drawContactsMenu();

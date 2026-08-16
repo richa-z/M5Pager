@@ -9,6 +9,13 @@ extern MenuState currentMenu;
 extern DynamicJsonDocument config;
 extern int menuIndex;
 
+//definované v menus/menu_wifi.h, ktoré sa vkladá až za týmto súborom
+void beginSsidEdit();
+void beginSsidPassEdit();
+
+//definované v m5pager.ino
+void lockAndPrompt();
+
 void drawSettingsMenu() {
     drawSettings(menuIndex);
 }
@@ -22,16 +29,26 @@ void handleSettingsMenuInput(int key) {
         menuIndex--;
         drawSettingsMenu();
     } else if (key == '.') {
-        if (menuIndex == 1) return;
+        if (menuIndex >= SETTINGS_COUNT - 1) return;
         menuIndex++;
         drawSettingsMenu();
     } else if (key == KEY_ENTER) {
         switch (menuIndex) {
-            case 0: //zmena username
+            case SETTINGS_USERNAME:
                 menuIndex = 0;
                 currentMenu = MENU_CHANGE_USERNAME;
                 break;
-            case 1: //mac adresa - read-only, takže žiadna akcia
+            case SETTINGS_WIFI_SSID:
+                beginSsidEdit();
+                break;
+            case SETTINGS_WIFI_PASS:
+                beginSsidPassEdit();
+                break;
+            case SETTINGS_LOCK:
+                menuIndex = 0;
+                lockAndPrompt();
+                break;
+            case SETTINGS_MAC: //read-only, takže žiadna akcia
                 break;
         }
     }
