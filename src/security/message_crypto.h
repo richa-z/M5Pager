@@ -15,38 +15,26 @@
 
 namespace MessageCrypto {
 
-// Konštanty pre kryptografické operácie
 constexpr size_t X25519_KEY_LEN = 32;
 constexpr size_t AES_KEY_LEN = 32;
 constexpr char X25519_DERIVE_CONTEXT[] = "M5PAGER_X25519_ID_V1";
 constexpr size_t CHAIN_KEY_LEN = 32;
 
-// Kontexty pre odvodenie koreňového kľúča a oboch smerových reťazcov
 constexpr char ROOT_KEY_CONTEXT[] = "M5PAGER_ROOT_V3";
 constexpr char CHAIN_I2R_CONTEXT[] = "M5PAGER_CHAIN_I2R_V3";
 constexpr char CHAIN_R2I_CONTEXT[] = "M5PAGER_CHAIN_R2I_V3";
 
-// Koľko chýbajúcich správ vieme preskočiť. Reťazec sa musí posunúť ešte pred overením
-// tagu, takže bez stropu by jediný podvrhnutý paket s obrovským počítadlom prinútil
-// zariadenie počítať miliardy HMAC operácií.
 constexpr uint32_t MAX_SKIPPED_MESSAGES = 256;
 constexpr char MESSAGE_AAD[] = "M5PAGER_MSG_V3";
 constexpr char FINGERPRINT_CONTEXT[] = "M5PAGER_FP_V1";
 
-// Poradové číslo správy proti replay útoku. Ide do AAD (takže ho nemožno zmeniť
-// bez zneplatnenia GCM tagu) a zároveň sa prenáša v blobe, aby ho príjemca vedel prečítať.
 constexpr size_t MESSAGE_COUNTER_LEN = 4;
 constexpr uint32_t MESSAGE_COUNTER_MAX = 0xFFFFFFFFUL;
 
-// Text sa pred šifrovaním doplní na násobok PAD_BUCKET_LEN. Šifrovanie samo o sebe
-// dĺžku neskrýva - z veľkosti paketu sa dá odhadnúť dĺžka správy ("ok" vs. odstavec).
-// Doplnenie je vnútri AEAD, takže je chránené tagom.
-//   [dĺžka textu: 2B LE][text][výplň núl do násobku PAD_BUCKET_LEN]
 constexpr size_t PAD_LENGTH_PREFIX = 2;
 constexpr size_t PAD_BUCKET_LEN = 32;
 
-// Koľko bajtov SHA-256 sa zobrazuje ako fingerprint (4 bajty = 8 hex znakov)
-constexpr size_t FINGERPRINT_BYTES = 4;
+constexpr size_t FINGERPRINT_BYTES = 16;
 
 /// @brief Naplní pole náhodnými bajtmi pomocou esp_random.
 /// @param  
@@ -285,7 +273,6 @@ inline bool x25519(const uint8_t scalar[X25519_KEY_LEN],
     mbedtls_mpi_free(&privateScalar);
     mbedtls_ecp_group_free(&group);
 
-    // Nulový výsledok znamená, že protistrana poslala bod malého rádu
     return rc == 0 && !isAllZero(outShared, X25519_KEY_LEN);
 }
 
@@ -319,18 +306,6 @@ inline bool hmacSha256(const uint8_t* key, size_t keyLen,
 }
 
 /// @brief Odvodí koreňový kľúč a oba reťazce z výsledkov štyroch X25519 operácií.
-///
-/// Skladajú sa štyri Diffie-Hellmanove výmeny:
-///   DH_s = statický(iniciátor)  x statický(odpovedajúci)   -> autentifikácia
-///   DH_a = efemérny(iniciátor)  x statický(odpovedajúci)
-///   DH_b = statický(iniciátor)  x efemérny(odpovedajúci)
-///   DH_e = efemérny(iniciátor)  x efemérny(odpovedajúci)   -> forward secrecy
-///
-/// Statické časti viažu reláciu na overiteľnú identitu (fingerprint), efemérne
-/// zabezpečujú, že po ich zahodení sa relácia nedá zrekonštruovať ani z dlhodobého
-/// kľúča zariadenia. Poradie je určené ROLOU, nie tým, kto počíta - inak by každá
-/// strana zložila vstup inak a kľúče by nesedeli.
-///
 /// @param dhStatic DH_s (32 bajtov)
 /// @param dhEphInitiator DH_a (32 bajtov)
 /// @param dhEphResponder DH_b (32 bajtov)
@@ -357,7 +332,6 @@ inline bool deriveHandshakeChains(const uint8_t dhStatic[X25519_KEY_LEN],
     Security::secureZero(ikm, sizeof(ikm));
     if (!ok) return false;
 
-    // Každý smer má vlastný reťazec, inak by obe strany posúvali ten istý stav
     ok = hmacSha256(root, sizeof(root),
                     reinterpret_cast<const uint8_t*>(CHAIN_I2R_CONTEXT),
                     sizeof(CHAIN_I2R_CONTEXT) - 1, outChainInitToResp);
@@ -518,8 +492,6 @@ inline bool completeHandshake(DynamicJsonDocument& contacts,
     }
 
     if (ok) {
-        // DH_a je vždy efemérny iniciátora x statický odpovedajúceho, DH_b naopak.
-        // Podľa roly sa líši, ktorý skalár na to použijeme.
         if (isInitiator) {
             ok = x25519(ownEphemeralPrivate, peerStatic, dhEphInitiator) &&
                  x25519(ownStaticScalar, peerEphemeral, dhEphResponder);
@@ -543,16 +515,11 @@ inline bool completeHandshake(DynamicJsonDocument& contacts,
         keys["x25519_own_pub"] = bytesToHex(ownStaticPublic, X25519_KEY_LEN);
         keys["role"] = isInitiator ? "init" : "resp";
 
-        // Každý smer dostane vlastný reťazec - kto posiela, ratchetuje tx_chain
         keys["tx_chain"] = bytesToHex(isInitiator ? chainI2R : chainR2I, CHAIN_KEY_LEN);
         keys["rx_chain"] = bytesToHex(isInitiator ? chainR2I : chainI2R, CHAIN_KEY_LEN);
 
-        // Fingerprint sa počíta zo STATICKÝCH kľúčov, takže sa medzi reláciami nemení
-        // a pripnutá identita z nálezu 1 ostáva v platnosti.
         keys["fingerprint"] = pairFingerprint(ownStaticPublic, peerStatic);
 
-        // Každý handshake má nové efemérne kľúče, takže reťazce sú vždy čerstvé
-        // a počítadlá sa smú bezpečne vynulovať.
         keys["tx_counter"] = 0;
         keys["rx_counter"] = 0;
 
@@ -657,7 +624,6 @@ inline uint32_t readCounterLE(const uint8_t in[MESSAGE_COUNTER_LEN]) {
            (static_cast<uint32_t>(in[3]) << 24);
 }
 
-// AAD správy = kontextový reťazec + poradové číslo
 constexpr size_t MESSAGE_AAD_LEN = sizeof(MESSAGE_AAD) - 1 + MESSAGE_COUNTER_LEN;
 
 /// @brief Zostaví AAD pre správu s daným poradovým číslom.
@@ -695,15 +661,11 @@ inline bool encryptPayload(DynamicJsonDocument& contacts,
     JsonObject keys = contacts[contactKey]["keys"].as<JsonObject>();
     uint32_t counter = keys["tx_counter"] | 0UL;
     if (counter >= MESSAGE_COUNTER_MAX) {
-        // Priestor poradových čísel je vyčerpaný. Ďalej sa už bez prekľúčovania
-        // šifrovať nesmie, inak by sa poradové číslo zopakovalo.
         Security::secureZero(chain, sizeof(chain));
         return false;
     }
     counter++;
 
-    // Kľúč správy sa vydá z reťazca, ktorý sa hneď posunie ďalej. Starý stav reťazca
-    // sa nikde neuchová, takže sa už nedá znovu vyrobiť kľúč k odoslanej správe.
     uint8_t aesKey[AES_KEY_LEN];
     uint8_t nextChain[CHAIN_KEY_LEN];
     if (!ratchetStep(chain, aesKey, nextChain)) {
@@ -721,8 +683,6 @@ inline bool encryptPayload(DynamicJsonDocument& contacts,
         return false;
     }
 
-    // Text sa doplní na násobok PAD_BUCKET_LEN, aby veľkosť paketu neprezrádzala,
-    // aká dlhá správa sa posiela
     size_t paddedLen = paddedPlaintextLen(textLen);
     uint8_t* padded = static_cast<uint8_t*>(malloc(paddedLen));
     if (padded == nullptr) {
@@ -768,7 +728,6 @@ inline bool encryptPayload(DynamicJsonDocument& contacts,
         ok = base64Encode(blob, blobLen, outBase64);
     }
     if (ok) {
-        // Reťazec sa posunie až po úspechu, aby zlyhanie nezhodilo synchronizáciu
         keys["tx_chain"] = bytesToHex(nextChain, CHAIN_KEY_LEN);
         keys["tx_counter"] = counter;
     }
@@ -817,9 +776,6 @@ inline bool decryptPayload(DynamicJsonDocument& contacts,
     JsonObject keys = contacts[contactKey]["keys"].as<JsonObject>();
     uint32_t lastSeen = keys["rx_counter"] | 0UL;
 
-    // Replay: správu s už videným poradovým číslom zahodíme ešte pred dešifrovaním.
-    // Poradové číslo je súčasťou AAD, takže ho útočník nevie zmeniť bez zneplatnenia tagu.
-    // Kľúč staršej správy navyše už neexistuje - reťazec sa posunul a späť sa nedá.
     uint32_t skipped = counter - lastSeen - 1;
     if (counter <= lastSeen || skipped > MAX_SKIPPED_MESSAGES) {
         Security::secureZero(blob, blobLen);
@@ -828,8 +784,6 @@ inline bool decryptPayload(DynamicJsonDocument& contacts,
         return false;
     }
 
-    // Reťazec posúvame v kópii - zapíše sa až po overení tagu, inak by jediný
-    // podvrhnutý paket natrvalo rozhodil synchronizáciu s protistranou.
     uint8_t aesKey[AES_KEY_LEN];
     uint8_t nextChain[CHAIN_KEY_LEN];
     if (!ratchetSkip(chain, skipped) || !ratchetStep(chain, aesKey, nextChain)) {
@@ -863,8 +817,6 @@ inline bool decryptPayload(DynamicJsonDocument& contacts,
                                  tag,
                                  plaintext);
     if (ok) {
-        // Odstránenie výplne. Dĺžka je vnútri AEAD, takže jej už možno veriť,
-        // aj tak ju ale overíme voči skutočnej veľkosti bloku.
         if (ciphertextLen < PAD_LENGTH_PREFIX) {
             ok = false;
         } else {
@@ -875,7 +827,6 @@ inline bool decryptPayload(DynamicJsonDocument& contacts,
             } else {
                 plaintext[PAD_LENGTH_PREFIX + textLen] = '\0';
                 outPlaintext = String(reinterpret_cast<char*>(plaintext + PAD_LENGTH_PREFIX));
-                // Posúvame až po overení tagu - podvrhnutým číslom sa nedá zablokovať príjem
                 keys["rx_chain"] = bytesToHex(nextChain, CHAIN_KEY_LEN);
                 keys["rx_counter"] = counter;
             }
@@ -892,4 +843,4 @@ inline bool decryptPayload(DynamicJsonDocument& contacts,
     return ok;
 }
 
-}  // namespace MessageCrypto
+} 

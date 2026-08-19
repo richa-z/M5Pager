@@ -19,7 +19,6 @@ enum class DeviceKeyProvisionState : uint8_t {
 
 namespace Security {
 
-// Konštanty pre kľúče a kryptografické operácie
 constexpr size_t DEVICE_PRIVATE_KEY_LEN = 32;
 constexpr size_t FILESYSTEM_KEY_LEN = 32;
 constexpr size_t PASSWORD_WRAP_KEY_LEN = 32;
@@ -29,24 +28,16 @@ constexpr size_t GCM_IV_LEN = 12;
 constexpr size_t GCM_TAG_LEN = 16;
 constexpr uint32_t PASSWORD_KDF_ITERATIONS = 200000;
 
-// Politika hesla. NVS nie je šifrované, takže wrapnutý kľúč sa dá z flashu vytiahnuť
-// a heslo lámať offline - dĺžka a zloženie hesla sú jediná reálna obrana.
-//
-// Povoľujeme dve cesty: krátke heslo musí miešať triedy znakov, dostatočne dlhá
-// fráza nemusí. Fráza zo štyroch-piatich bežných slov má oveľa vyššiu entropiu než
-// desaťznakové "heslo s číslicou", hoci vyzerá jednoduchšie.
 constexpr size_t PASSWORD_MIN_LEN = 10;
 constexpr size_t PASSPHRASE_MIN_LEN = 20;
 constexpr size_t PASSWORD_MAX_LEN = 64;
 
-// Koľko hviezdičiek sa zmestí na displej - dlhšie heslo sa zobrazí skrátene s počtom
 constexpr size_t PASSWORD_MASK_DISPLAY_MAX = 22;
 
-// Po koľkých neúspešných pokusoch začneme spomaľovať a aký je strop čakania (sekundy)
 constexpr uint32_t PASSWORD_FREE_ATTEMPTS = 3;
 constexpr uint32_t PASSWORD_MAX_BACKOFF_S = 60;
 
-// Názvy pre NVS kľúče a namespace
+//namespace
 constexpr const char* DEVICE_KEY_NAMESPACE = "crypto";
 constexpr const char* LEGACY_DEVICE_KEY_NAME = "device_sk";
 constexpr const char* WRAP_MARKER_KEY = "wrap_v1";
@@ -58,12 +49,10 @@ constexpr const char* WRAP_CIPHERTEXT_KEY = "sk_ct";
 constexpr const char* FILESYSTEM_SALT_KEY = "fs_salt";
 constexpr const char* PASSWORD_FAIL_KEY = "pw_fails";
 
-// Konštanty pre kontexty a AAD v kryptografických operáciách
 constexpr char KEY_WRAP_AAD[] = "M5PAGER_SK_WRAP_V1";
 constexpr char FILE_AAD[] = "M5PAGER_FILE_V1";
 constexpr char FILESYSTEM_DERIVE_CONTEXT[] = "M5PAGER_FS_KEY_V1";
 
-// Štruktúra pre ukladanie runtime informácií o kľúčoch
 struct DeviceKeyRuntime {
     bool ready = false;
     bool filesystemReady = false;
@@ -275,7 +264,7 @@ inline String maskPassword(const String& password) {
         masked += '*';
     }
 
-    // Dlhá fráza by sa cez displej nezmestila - zvyšok zhrnieme počtom znakov
+    //displej limit >:c
     if (len > shown) {
         masked += "(";
         masked += String(static_cast<unsigned>(len));
@@ -407,7 +396,6 @@ inline bool capturePassword(const char* title, String& outPassword, size_t maxLe
 /// @param outReason Dôvod zamietnutia (výstup, len ak funkcia vráti FALSE)
 /// @return TRUE, ak heslo vyhovuje, inak FALSE
 inline bool isPasswordAcceptable(const String& password, const char*& outReason) {
-    // Dlhá fráza je sama o sebe dosť silná, zloženie znakov neriešime
     if (password.length() >= PASSPHRASE_MIN_LEN) {
         outReason = nullptr;
         return true;
@@ -628,7 +616,6 @@ inline bool unlockExistingKey(nvs_handle_t handle) {
     uint8_t wrapKey[PASSWORD_WRAP_KEY_LEN];
     uint8_t privateKey[DEVICE_PRIVATE_KEY_LEN];
 
-    // Počítadlo prežije reboot, takže vypnutím zariadenia sa backoff neobíde
     uint32_t failedAttempts = readFailedAttempts(handle);
 
     while (true) {

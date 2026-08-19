@@ -10,15 +10,13 @@
 #include "menus.h"
 #include "enums/add_contact_type.h"
 
-extern MenuState currentMenu; //Aktuálna ponuka pre input tracking
+extern MenuState currentMenu; //Akttivna ponuka pre input tracking
 extern int contactsSize;
 
-extern DynamicJsonDocument config; //globálny config dokument
+extern DynamicJsonDocument config; //global config dokument
 
-// Vlastnená kópia. Ukazovateľ do JSON dokumentu alebo do iného Stringu tu byť nesmie -
-// obe úložiská sa prepisujú a ukazovateľ by ostal visieť.
 extern String user;
-// Poradie musí sedieť s handleSettingsMenuInput()
+// Poradie musi sediet s handleSettingsMenuInput()!!!!
 enum SettingsRow {
     SETTINGS_USERNAME = 0,
     SETTINGS_WIFI_SSID,
@@ -30,15 +28,12 @@ enum SettingsRow {
 
 extern int messageScroll;
 
-//UI konštanty pre dizajn a rozloženie
 constexpr int UI_TOPBAR_HEIGHT = 12;
 constexpr int UI_TOPBAR_TEXT_Y = 2;
 constexpr int UI_CONTENT_TOP_Y = UI_TOPBAR_HEIGHT + 2;
 constexpr int UI_CARD_GAP = 4;
 constexpr int UI_CARD_HEIGHT = 18;
 
-// Strop histórie na kontakt. Dokument kontaktov má pevnú veľkosť, takže bez stropu
-// sa dá zaplniť pool (aj vzdialene) a ďalšie zápisy potichu zlyhávajú.
 constexpr size_t MAX_MESSAGES_PER_CONTACT = 40;
 
 inline uint16_t uiBgColor() { return M5Cardputer.Display.color565(8, 10, 14); }
@@ -336,7 +331,6 @@ String drawContacts(DynamicJsonDocument& contacts, int selectedIdx = 0) {
 
     contactsSize = contactCount;
 
-    //Moznost pridania kontaktu
     if (selectedIdx == contactCount) {
         temp = "ADD_CONTACT_BTN";
     }
@@ -408,7 +402,6 @@ void drawSettings(int selectedIdx = 0) {
     String wifiSsid = config["wifi_ssid"] | "";
     String wifiPass = config["wifi_pass"] | "";
 
-    // Heslo siete sa v zozname nikdy nevypisuje - je viditeľné len pri jeho úprave
     String maskedPass;
     for (size_t i = 0; i < wifiPass.length(); i++) maskedPass += '*';
 
@@ -461,8 +454,6 @@ bool appendMessage(DynamicJsonDocument& contacts, const String& contactKey, cons
 
     JsonArray messages = contact["messages"].as<JsonArray>();
 
-    // História je limitovaná veľkosťou dokumentu - najstaršie správy zahadzujeme,
-    // inak sa pool ticho zaplní a ArduinoJson prestane zapisovať bez chyby.
     while (messages.size() >= MAX_MESSAGES_PER_CONTACT) {
         messages.remove(0);
     }
@@ -474,7 +465,6 @@ bool appendMessage(DynamicJsonDocument& contacts, const String& contactKey, cons
     msg["text"] = text;
 
     if (contacts.overflowed()) {
-        // Zápis sa nevošiel do poolu - správu radšej odstránime, než by sme uložili polovičný záznam
         messages.remove(messages.size() - 1);
         return false;
     }

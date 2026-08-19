@@ -9,11 +9,9 @@ extern MenuState currentMenu;
 extern DynamicJsonDocument config;
 extern int menuIndex;
 
-//definované v menus/menu_wifi.h, ktoré sa vkladá až za týmto súborom
 void beginSsidEdit();
 void beginSsidPassEdit();
 
-//definované v m5pager.ino
 void lockAndPrompt();
 
 void drawSettingsMenu() {
@@ -48,7 +46,7 @@ void handleSettingsMenuInput(int key) {
                 menuIndex = 0;
                 lockAndPrompt();
                 break;
-            case SETTINGS_MAC: //read-only, takže žiadna akcia
+            case SETTINGS_MAC: //read only
                 break;
         }
     }

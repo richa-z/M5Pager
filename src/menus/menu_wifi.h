@@ -37,12 +37,6 @@ void beginSsidPassEdit() {
     currentMenu = MENU_CHANGE_SSID_PASS;
 }
 
-/*
-
-SSID
-
-*/
-
 void drawChangeSsid() {
     beginScreenFrame();
     drawSectionTitle("WIFI SSID");
@@ -83,17 +77,9 @@ void handleChangeSsidInput(int key) {
     }
 }
 
-/*
-
-HESLO SIETE
-
-*/
-
 void drawChangeSsidPass() {
     beginScreenFrame();
     drawSectionTitle("WIFI PASSWORD");
-    // Počas úpravy sa heslo zobrazuje čitateľne, aby si ho používateľ vedel overiť.
-    // V zozname nastavení je vždy zamaskované.
     drawInputCard("Network password", newWifiPass, "min 8 chars", UI_CONTENT_TOP_Y + 20, 24);
     drawHintLine("WPA2 requires 8-63 characters", UI_CONTENT_TOP_Y + 48, uiTextMutedColor());
     drawHintLine("` Back    Enter Save", UI_CONTENT_TOP_Y + 58, uiTextMutedColor());

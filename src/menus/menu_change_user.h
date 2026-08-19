@@ -38,7 +38,7 @@ void handleChangeUsernameInput(int key) {
             showSuccessToast("Username saved", 700);
         }
         menuIndex = 0;
-        user = newUsername;  //kópia, nie ukazovateľ do buffera, ktorý hneď vyprázdnime
+        user = newUsername;
         newUsername = "";
         currentMenu = MENU_SETTINGS;
         return;

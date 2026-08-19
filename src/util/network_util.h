@@ -5,8 +5,6 @@
 #include <stdio.h>
 #include <stdint.h>
 
-// Limity dané štandardom WiFi / WPA2. Heslo kratšie než 8 znakov softAP odmietne -
-// bez kontroly by sa sieť buď nevytvorila, alebo vznikla ako otvorená.
 constexpr size_t WIFI_SSID_MAX_LEN = 32;
 constexpr size_t WIFI_PASS_MIN_LEN = 8;
 constexpr size_t WIFI_PASS_MAX_LEN = 63;

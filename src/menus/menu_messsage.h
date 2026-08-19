@@ -175,14 +175,11 @@ uint16_t sendSplitMessage(const uint8_t* targetMac, const String& contactKey, co
         return 0;
     }
 
-    // Poradové číslo musí byť na disku skôr, než správu odošleme. Keby sme zariadenie
-    // vypli medzi odoslaním a uložením, po štarte by sme číslo použili znovu a
-    // protistrana by nám všetky ďalšie správy zahadzovala ako replay.
     if (!saveContacts(contacts, "/m5pager/contacts.json")) {
         return 0;
     }
 
-    // Dátové ID nikdy nemá nastavený najvyšší bit - ten je vyhradený pre kontrolné pakety
+    //najvyssi bit len pre control pakety
     messageCounter = (messageCounter + 1) & MESSAGE_ID_VALUE_MASK;
     if (messageCounter == 0) messageCounter = 1;
 
@@ -193,7 +190,7 @@ uint16_t sendSplitMessage(const uint8_t* targetMac, const String& contactKey, co
 
     awaitingAck = true;
     awaitingMsgId = msgId;
-    memcpy(awaitingMac, targetMac, 6);  //ACK uznáme len od tohto príjemcu
+    memcpy(awaitingMac, targetMac, 6); //ACK len od toho co poslal
     sendTimestamp = millis();
     pendingOutgoingReady = true;
     pendingOutgoingContact = contactKey;

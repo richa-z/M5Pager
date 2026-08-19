@@ -23,7 +23,7 @@ const char* contactOptions[] = {
 
 constexpr int CONTACT_OPTIONS_SIZE = 4;
 
-/// @brief Nakreslí obrazovku s možnosťami pre aktuálne vybraný kontakt.
+/// @brief Nakreslí obrazovku s možnosťami pre aktuálne vybraný kontakt (D:).
 void drawContactOptions() {
     beginScreenFrame();
     drawSectionTitle("CONTACT");
@@ -75,8 +75,7 @@ void handleContactOptionsInput(int key) {
     if (key == KEY_ENTER) {
         switch (menuIndex) {
             case 0: // Start key exchange
-                // Existujúcu reláciu zahodíme len tu, na vedomý pokyn používateľa.
-                // Prichádzajúci paket ju prepísať nesmie (pozri handleKeyExchangePacket).
+                // Prichadzajuci paket ju prepisať nemoze -> handleKeyExchangePacket
                 clearSession(selectedContact);
                 if (requestKeyExchange(selectedContact.c_str())) {
                     drawContactOptions();

@@ -12,12 +12,12 @@
 #include "security/device_key_store.h"
 
 
-constexpr uint8_t ENC_FILE_MAGIC[] = {'M', '5', 'E', 'N', 'C', '0', '1'}; //Magic bytes pre identifikáciu našich šifrovaných súborů
+constexpr uint8_t ENC_FILE_MAGIC[] = {'M', '5', 'E', 'N', 'C', '0', '1'};
 constexpr size_t ENC_FILE_MAGIC_LEN = sizeof(ENC_FILE_MAGIC); 
 constexpr uint8_t ENC_FILE_VERSION = 1;
 constexpr size_t ENC_FILE_LEN_FIELD = 4;
 constexpr size_t ENC_FILE_HEADER_LEN =
-    ENC_FILE_MAGIC_LEN + 1 + Security::GCM_IV_LEN + Security::GCM_TAG_LEN + ENC_FILE_LEN_FIELD; //Dĺžka hlavičky šifrovaného souboru
+    ENC_FILE_MAGIC_LEN + 1 + Security::GCM_IV_LEN + Security::GCM_TAG_LEN + ENC_FILE_LEN_FIELD; //hlavicka
 
 
 /// @brief Zapíše 32-bitové číslo do pola v little-endian formáte
@@ -349,8 +349,6 @@ bool saveContacts(const DynamicJsonDocument &contacts, const char* filename) {
 /// @return TRUE, ak sa operácia podarila, inak FALSE
 bool loadConfig(DynamicJsonDocument &config, const char* filename) {
     M5Cardputer.Display.println("[*] Loading config...");
-    // wifi_ssid / wifi_pass sa tu zámerne nedopĺňajú - predvolené SSID drží
-    // DEFAULT_WIFI_SSID a heslo siete si musí zadať používateľ pri prvom štarte.
     if (!loadJsonEncryptedAware(config, filename, "config", "{\"username\":\"User\"}")) {
         return false;
     }
