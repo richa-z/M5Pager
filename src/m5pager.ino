@@ -62,9 +62,6 @@ MenuHandler menus[] = {
   {drawChangeSsidPass, handleChangeSsidPassInput}
 };
 
-// Prihlasovacie údaje siete sa NEZAPISUJÚ do zdrojáku - boli by v gite aj v každom
-// vypísanom firmvéri a všetky zariadenia by zdieľali jedno heslo. Držia sa v config.json,
-// ktorý je na karte šifrovaný kľúčom zariadenia, a menia sa v Settings.
 constexpr const char* DEFAULT_WIFI_SSID = "PAGER_COM";
 
 String wifiSsid = "";
@@ -72,8 +69,6 @@ String wifiPass = "";
 
 uint8_t selectedMac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-// Vlastnená kópia kľúča kontaktu. Ukazovateľ do JSON dokumentu tu byť nesmie -
-// dokument sa prealokuje pri raste a ukazovateľ by ostal visieť.
 String selectedContact = "";
 
 bool isAP = false;
@@ -98,7 +93,7 @@ bool isTypingMsg = false;
 
 bool awaitingAck = false;
 uint16_t awaitingMsgId = 0;
-uint8_t awaitingMac[6] = {0}; //komu sme poslali - ACK od nikoho iného neuznáme
+uint8_t awaitingMac[6] = {0};
 unsigned long sendTimestamp = 0;
 bool pendingOutgoingReady = false;
 String pendingOutgoingContact = "";
@@ -107,13 +102,9 @@ int messageScroll = 0;
 bool stealthMode = false;
 unsigned long nextAliveBroadcast = 0;
 
-// Po nečinnosti sa zariadenie zamkne - kľúče aj dešifrované dáta sa vymažú z RAM
-// a znovu sa pýta heslo. Bez toho stačí odložené odomknuté zariadenie zdvihnúť.
 constexpr unsigned long IDLE_LOCK_TIMEOUT_MS = 5UL * 60UL * 1000UL;
 unsigned long lastActivityMs = 0;
 
-// Efemérny súkromný kľúč rozpracovanej výmeny. Drží sa VÝHRADNE v RAM a po dokončení
-// (alebo vypršaní) sa vynuluje - práve jeho zahodenie dáva forward secrecy.
 constexpr unsigned long KEY_EXCHANGE_TIMEOUT_MS = 30UL * 1000UL;
 bool pendingExchangeValid = false;
 String pendingExchangeContact = "";
@@ -134,9 +125,6 @@ NETWORKING
 
 */
 
-// ESP-NOW receive callback beží vo WiFi tasku súbežne s loop(). Nesmie preto sahať
-// na JSON dokument, SD kartu ani na displej - všetko to používa aj loop() a nič z toho
-// nie je chránené zámkom. Callback preto paket iba odloží do fronty a spracuje ho loop().
 constexpr uint8_t RX_QUEUE_SIZE = 8;
 static RxQueueItem rxQueue[RX_QUEUE_SIZE];
 static volatile uint8_t rxQueueHead = 0;  //zapisuje konzument (loop)
@@ -171,10 +159,6 @@ bool selectContactPeer(const char* contactMac) {
 /// @brief Vráti nasledujúce ID pre kontrolné správy. Kontrolné správy sú tie, ktoré nie sú rozdelené na viacero paketov (napr. ACK, výmena kľúčov).
 /// @return Nasledujúce ID pre kontrolné správy
 uint16_t nextControlMessageId() {
-    // Kontrolné ID majú vždy nastavený najvyšší bit, dátové (sendSplitMessage) nikdy.
-    // Predtým obe rady rástli v spoločnom 16-bitovom priestore a po pretečení sa
-    // začali prekrývať - ACK alebo odpoveď na výmenu kľúčov sa tak mohli spárovať
-    // s nesúvisiacou správou.
     static uint16_t controlMessageCounter = 0;
     controlMessageCounter = (controlMessageCounter + 1) & MESSAGE_ID_VALUE_MASK;
     if (controlMessageCounter == 0) controlMessageCounter = 1;
@@ -273,8 +257,6 @@ bool requestKeyExchange(const char* contactMac) {
     String staticPubHex;
     if (!MessageCrypto::getOwnPublicKeyHex(staticPubHex)) return false;
 
-    // Pre každú výmenu sa vyrobí nový efemérny pár - vďaka nemu sa relácia nedá
-    // zrekonštruovať ani neskôr z dlhodobého kľúča zariadenia
     uint8_t ephPriv[MessageCrypto::X25519_KEY_LEN];
     uint8_t ephPub[MessageCrypto::X25519_KEY_LEN];
     if (!MessageCrypto::generateEphemeralKeypair(ephPriv, ephPub)) return false;
@@ -282,8 +264,6 @@ bool requestKeyExchange(const char* contactMac) {
     String contactKey = findContactKeyByMac(contacts, String(contactMac));
     if (contactKey.length() == 0) contactKey = String(contactMac);
 
-    // ID si zapamätáme, aby sme vedeli overiť, že prichádzajúci P_ACK_EXCH
-    // patrí k tejto našej žiadosti a nie je podvrhnutý cudzou stranou.
     uint16_t exchangeId = nextControlMessageId();
 
     JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
@@ -319,11 +299,8 @@ void clearSession(const String& contactKey) {
     keys.remove("fingerprint");
     keys.remove("rekey_offer");
     keys.remove("pending_id");
-
-    // Reťazce sa zahadzujú bez náhrady - staré kľúče správ sa už nedajú vyrobiť.
-    // Počítadlá netreba zachovávať: každý handshake má nové efemérne kľúče,
-    // takže nová relácia nikdy nepoužije rovnaké kľúče ako niektorá predošlá.
 }
+
 /// @brief Spracuje paket výmeny kľúčov.
 /// @param mac_addr MAC adresa odosielateľa
 /// @param pkt Paket
@@ -335,8 +312,6 @@ void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) 
         return;
     }
 
-    // Payload je statický aj efemérny verejný kľúč v hex tvare. Overíme ho skôr,
-    // než kvôli nemu čokoľvek založíme.
     const size_t keyHexLen = MessageCrypto::X25519_KEY_LEN * 2;
     if (payload.length() != keyHexLen * 2) return;
 
@@ -347,8 +322,6 @@ void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) 
     bool knownContact = contactKey.length() > 0;
 
     if (pkt.type == P_ACK_EXCH) {
-        // Odpoveď uznáme len vtedy, ak sme výmenu sami začali a ID sedí s našou žiadosťou.
-        // Bez toho by hocikto mohol poslať nevyžiadaný P_ACK_EXCH a prepísať nám kľúč.
         if (!knownContact) return;
 
         JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
@@ -358,7 +331,6 @@ void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) 
         uint16_t pendingId = keys["pending_id"] | 0;
         if (pendingId == 0 || pendingId != pkt.message_id) return;
 
-        // Bez nášho efemérneho kľúča sa handshake dokončiť nedá
         if (!pendingExchangeValid || !pendingExchangeContact.equalsIgnoreCase(contactKey)) return;
         if (millis() - pendingExchangeStartedMs > KEY_EXCHANGE_TIMEOUT_MS) {
             clearPendingExchange();
@@ -366,14 +338,8 @@ void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) 
         }
     } else {  // P_INIT_EXCH
         if (knownContact && MessageCrypto::hasReadySession(contacts, contactKey)) {
-            // S týmto kontaktom už bezpečnú reláciu máme. Nevyžiadanú žiadosť o novú
-            // NEPRIJMEME automaticky - inak by stačilo podvrhnúť MAC kontaktu a kľúč
-            // by sa ticho vymenil za útočníkov. Ponuku iba odložíme na schválenie.
             JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
 
-            // Zaznamenáme len prvú ponuku a ďalšie ignorujeme, kým ju používateľ
-            // nevybaví. Inak by opakovaný P_INIT_EXCH (zakaždým s iným kľúčom)
-            // vynucoval zápis na SD a blokujúci toast pri každom pakete.
             if (keys["rekey_offer"].is<const char*>()) return;
 
             keys["rekey_offer"] = peerPublicHex;
@@ -386,15 +352,11 @@ void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) 
             }
             return;
         }
-
-        // Prvé spárovanie (TOFU) - kontakt vytvoríme až tu, keď je paket overený
         if (!knownContact) contactKey = ensureContactKeyForMac(senderMac);
     }
 
     bool isInitiator = (pkt.type == P_ACK_EXCH);
 
-    // Iniciátor použije efemérny kľúč, ktorý si drží od odoslania žiadosti.
-    // Odpovedajúci si vyrobí vlastný až teraz a hneď po výpočte ho zahodí.
     uint8_t ephPriv[MessageCrypto::X25519_KEY_LEN];
     uint8_t ephPub[MessageCrypto::X25519_KEY_LEN];
     String ownEphemeralHex;
@@ -409,7 +371,6 @@ void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) 
     bool ok = MessageCrypto::completeHandshake(contacts, contactKey, peerPublicHex,
                                                peerEphemeralHex, ephPriv, isInitiator);
 
-    // Efemérny súkromný kľúč už nikdy nebude potrebný - zahodením vzniká forward secrecy
     Security::secureZero(ephPriv, sizeof(ephPriv));
     if (isInitiator) clearPendingExchange();
 
@@ -432,8 +393,6 @@ void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) 
 
     if (currentMenu == MENU_MESSAGE && senderMac.equalsIgnoreCase(selectedContact)) {
         drawMessageMenu();
-        // Fingerprint si majitelia oboch zariadení musia porovnať mimo kanála,
-        // inak sa MITM pri prvom spárovaní nedá odhaliť.
         showSuccessToast("Key: " + MessageCrypto::getSessionFingerprint(contacts, contactKey), 2000);
         drawMessageMenu();
     }
@@ -454,12 +413,11 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     if (mac_addr == nullptr) return;
 
-    // Formát paketu sa overí hneď tu - do fronty ide len to, čo je platné a konzistentné
     MessageStruct pkt;
     if (!deserializePacket(data, data_len, pkt)) return;
 
     uint8_t next = (rxQueueTail + 1) % RX_QUEUE_SIZE;
-    if (next == rxQueueHead) return;  //fronta je plná, paket zahodíme
+    if (next == rxQueueHead) return;
 
     RxQueueItem& item = rxQueue[rxQueueTail];
     memcpy(item.mac, mac_addr, 6);
@@ -473,8 +431,6 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
 /// @param pkt Paket (už overený deserializePacket)
 void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
     if (pkt.type == P_MSG_ACK) {
-        // ACK uznáme len od toho, komu sme správu naozaj poslali. Inak by ľubovoľné
-        // zariadenie mohlo potvrdiť cudziu správu a označiť ju za doručenú.
         if (awaitingAck && memcmp(mac_addr, awaitingMac, 6) == 0 && pkt.message_id == awaitingMsgId) {
             awaitingAck = false;
             if (pendingOutgoingReady) {
@@ -503,8 +459,6 @@ void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
     if (pkt.split_size == 0 || pkt.split_size > MAX_MESSAGE_PARTS) return;
     if (pkt.split_index >= pkt.split_size) return;
 
-    // Iba posledná časť smie byť kratšia. Vďaka tomu je offset každej časti
-    // jednoznačne split_index * MSG_CHUNK_SIZE a poradie príchodu nehrá rolu.
     bool isLastPart = (pkt.split_index + 1 == pkt.split_size);
     if (!isLastPart && pkt.data_len != MSG_CHUNK_SIZE) return;
     if (isLastPart && pkt.data_len == 0) return;
@@ -512,7 +466,6 @@ void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
     unsigned long now = millis();
 
     if (pkt.split_index == 0) {
-        // Nová správa - zostavovanie vždy začína časťou 0
         resetAssembly(assembly);
         assembly.active = true;
         memcpy(assembly.from, mac_addr, 6);
@@ -520,9 +473,6 @@ void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
         assembly.expected_parts = pkt.split_size;
         assembly.lastPacketMs = now;
     } else {
-        // Bez prijatej časti 0 nevieme, koľko častí čakať. Predtým sa taký paket prijal
-        // s expected_parts == 0, čo test úplnosti vyhodnotil ako hotovú správu -
-        // jediný podvrhnutý paket tak vedel založiť kontakt a vynútiť zápis na SD.
         if (!assembly.active) return;
         if (memcmp(assembly.from, mac_addr, 6) != 0) return;
         if (pkt.message_id != assembly.message_id) return;
@@ -552,7 +502,6 @@ void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
 
     if (!complete) return;
 
-    // Všetky časti okrem poslednej sú plné, takže dáta ležia v buffri súvisle za sebou
     size_t totalLen = 0;
     for (uint8_t i = 0; i < assembly.expected_parts; i++) {
         totalLen += assembly.partLen[i];
@@ -564,11 +513,8 @@ void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
     for (size_t i = 0; i < totalLen; i++) {
         payload += assembly.data[i];
     }
-    resetAssembly(assembly);  //zostavovanie je hotové, stav zahodíme
+    resetAssembly(assembly);
 
-    // Správu od neznámeho odosielateľa zahodíme bez zápisu. Kontakt sa zakladá výhradne
-    // pri výmene kľúčov - inak by ľubovoľné zariadenie vedelo spoofnutými MAC adresami
-    // donekonečna zakladať kontakty a vynucovať zápisy na SD kartu.
     String contactKey = findContactKeyByMac(contacts, senderMac);
     if (contactKey.length() == 0) return;
 
@@ -598,7 +544,6 @@ ZAMYKANIE
 void lockDevice() {
     Security::lockRuntimeKeys();
 
-    // Samotné kľúče nestačia - v RAM ostáva história správ aj session kľúče kontaktov
     contacts.clear();
     config.clear();
 
@@ -616,7 +561,6 @@ void lockDevice() {
     pendingOutgoingContact = "";
     pendingOutgoingText = "";
 
-    // Zamknuté zariadenie nemá čím pakety dešifrovať, takže ich zahodíme
     resetAssembly(assembly);
     rxQueueHead = rxQueueTail;
     clearPendingExchange();
@@ -643,7 +587,6 @@ bool unlockDevice() {
 
     user = config["username"] | "User";
 
-    // Čokoľvek, čo prišlo počas zámku, je už neaktuálne
     rxQueueHead = rxQueueTail;
     lastActivityMs = millis();
 
@@ -702,7 +645,6 @@ void setup() {
   } else {
       M5Cardputer.Display.println("[+] Device private key loaded.");
   }
-  // Fingerprint sa počíta z VEREJNÉHO kľúča (SHA-256), nikdy nie z privátneho
   M5Cardputer.Display.println("[*] Key ID: " + MessageCrypto::getOwnPublicKeyFingerprint());
 
   spi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
@@ -714,7 +656,6 @@ void setup() {
 
   M5Cardputer.Display.println("[+] SD Card initialized.");
 
-  // Config sa načíta ešte pred sieťou - sú v ňom prihlasovacie údaje siete
   if (!loadConfig(config, "/m5pager/config.json")) {
       M5Cardputer.Display.println("[-] FATAL: Failed to load config.");
       return;
@@ -724,8 +665,6 @@ void setup() {
   wifiSsid = config["wifi_ssid"] | DEFAULT_WIFI_SSID;
   wifiPass = config["wifi_pass"] | "";
 
-  // Bez hesla by softAP() buď zlyhal, alebo vytvoril otvorenú sieť. Necháme si ho
-  // zadať hneď pri prvom štarte, meniť sa dá neskôr v Settings.
   if (!isValidWifiPassword(wifiPass)) {
       M5Cardputer.Display.println("[*] Network password not set.");
       while (true) {
@@ -744,7 +683,6 @@ void setup() {
           return;
       }
 
-      // Výzva na heslo prekreslila obrazovku a prepla font - vrátime pôvodné nastavenie
       M5Cardputer.Display.setTextFont(2);
       M5Cardputer.Display.setTextSize(0.75);
       M5Cardputer.Display.setTextScroll(true);
@@ -827,9 +765,6 @@ MenuState previousMenu = MENU_MAIN;
 
 void loop() {
   M5Cardputer.update();
-
-  // Prijaté pakety sa spracúvajú tu, nie v ESP-NOW callbacku - JSON dokument,
-  // SD karta a displej sa tak používajú len z jedného tasku.
   drainRxQueue();
 
   int key = 0;
@@ -858,7 +793,6 @@ void loop() {
       return;
   }
 
-  // Nedokončená výmena kľúčov nesmie držať efemérny kľúč v pamäti donekonečna
   if (pendingExchangeValid && millis() - pendingExchangeStartedMs > KEY_EXCHANGE_TIMEOUT_MS) {
       clearPendingExchange();
   }
