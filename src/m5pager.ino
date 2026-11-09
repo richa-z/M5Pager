@@ -13,8 +13,14 @@
 #include "gui_handlers.h"
 #include "security/device_key_store.h"
 #include "security/message_crypto.h"
+#include "security/peer_auth.h"
+#include "security/group_store.h"
 
 #include "enums/packet_types.h"
+#include "transport/reliable_delivery.h"
+#include "transport/mesh.h"
+#include "transport/discovery.h"
+#include <utility>
 
 #include "menus.h"
 #include "menus/menu_main.h"
@@ -26,6 +32,9 @@
 #include "menus/menu_contact_options.h"
 #include "menus/menu_edit_contact.h"
 #include "menus/menu_wifi.h"
+#include "menus/menu_network.h"
+#include "menus/menu_verify_peer.h"
+#include "menus/menu_groups.h"
 
 
 
@@ -43,7 +52,9 @@ MenuState currentMenu = MENU_MAIN;
 int menuIndex = 0;
 const char* mainMenuItems[] = {
     "Contacts",
-    "Settings"
+    "Settings",
+    "Network",
+    "Groups"
 };
 
 const int mainMenuSize = sizeof(mainMenuItems) / sizeof(mainMenuItems[0]);
@@ -59,7 +70,20 @@ MenuHandler menus[] = {
   {drawContactOptions, handleContactOptionsInput},
   {drawEditContact, handleEditContactInput},
   {drawChangeSsid, handleChangeSsidInput},
-  {drawChangeSsidPass, handleChangeSsidPassInput}
+  {drawChangeSsidPass, handleChangeSsidPassInput},
+  {drawNetworkMenu, handleNetworkInput},
+  {drawNearbyMenu, handleNearbyInput},
+  {drawPeerVerification, handlePeerVerification},
+  {drawGroupsMenu, handleGroupsInput},
+  {drawGroupCreate, handleGroupCreate},
+  {drawGroupChat, handleGroupChat},
+  {drawGroupManage, handleGroupManage},
+  {drawGroupAdd, handleGroupAdd},
+  {drawGroupActions, handleGroupActions},
+  {drawGroupDelivery, handleGroupDelivery},
+  {drawGroupRename, handleGroupRename},
+  {drawGroupInfo, handleGroupInfo},
+  {drawGroupMember, handleGroupMember}
 };
 
 constexpr const char* DEFAULT_WIFI_SSID = "PAGER_COM";
@@ -76,11 +100,21 @@ bool isAP = false;
 MessageStruct msgIncoming;
 MessageStruct msgOutgoing;
 
-IncomingAssembly assembly{};
+IncomingAssembly assemblies[Delivery::REASSEMBLY_SLOTS]{};
+Delivery::Pending pendingDelivery;
 
 SPIClass spi = SPIClass(FSPI);
 DynamicJsonDocument contacts(8192);
 DynamicJsonDocument config(1024);
+Groups::Document groups(Groups::STORE_CAPACITY);
+String selectedGroup, groupInput, groupConfirm, groupActionMac;
+uint32_t groupActionEpoch = 0;
+uint32_t groupComposeEpoch = 0;
+bool groupReviewRequired = false;
+MenuState verificationReturnMenu = MENU_MESSAGE;
+bool isTypingGroup = false;
+int groupScroll = 0;
+MessageCrypto::ContentKind pendingOutgoingKind = MessageCrypto::ContentKind::Text;
 
 char inputBuffer[MSG_CHUNK_SIZE];
 int bytesRead;
@@ -99,24 +133,37 @@ bool pendingOutgoingReady = false;
 String pendingOutgoingContact = "";
 String pendingOutgoingText = "";
 int messageScroll = 0;
-bool stealthMode = false;
+bool discoveryEnabled = false;
+bool meshEnabled = false;
+Discovery::State nearby;
+Mesh::State meshState;
 unsigned long nextAliveBroadcast = 0;
 
 constexpr unsigned long IDLE_LOCK_TIMEOUT_MS = 5UL * 60UL * 1000UL;
 unsigned long lastActivityMs = 0;
 
-constexpr unsigned long KEY_EXCHANGE_TIMEOUT_MS = 30UL * 1000UL;
-bool pendingExchangeValid = false;
-String pendingExchangeContact = "";
-uint8_t pendingExchangeEphPriv[MessageCrypto::X25519_KEY_LEN] = {0};
-unsigned long pendingExchangeStartedMs = 0;
+PeerAuth::Pending pendingExchange;
+PeerAuth::Budget inboundBudget;
+PeerAuth::Budget handshakeBudget;
+String pairingContact;
+unsigned long pairingStartedMs = 0;
+String verificationSnapshot;
+bool verificationConfirm = false;
 
-/// @brief Zahodí rozpracovanú výmenu kľúčov a vynuluje efemérny kľúč.
 void clearPendingExchange() {
-    Security::secureZero(pendingExchangeEphPriv, sizeof(pendingExchangeEphPriv));
-    pendingExchangeValid = false;
-    pendingExchangeContact = "";
-    pendingExchangeStartedMs = 0;
+    pendingExchange.clear();
+}
+
+bool pairingAllowed(const String& contact) {
+    return pairingContact == contact && pairingContact.length() != 0 &&
+           millis() - pairingStartedMs < PeerAuth::PAIRING_WINDOW_MS;
+}
+
+bool armPeerPairing(const String& contact) {
+    if (!contacts.containsKey(contact) || pendingExchange.active || awaitingAck) return false;
+    pairingContact = contact;
+    pairingStartedMs = millis();
+    return true;
 }
 
 /*
@@ -143,6 +190,93 @@ bool addOrRefreshPeer(const uint8_t* peerMac) {
     peer.encrypt = false;
 
     return esp_now_add_peer(&peer) == ESP_OK;
+}
+
+bool selectContactPeer(const char* contactMac);
+
+bool sendBroadcastFrame(const uint8_t* wire, size_t length) {
+    return addOrRefreshPeer(Mesh::BROADCAST) && esp_now_send(Mesh::BROADCAST, wire, length) == ESP_OK;
+}
+
+bool sendApplicationPacket(const uint8_t* destination, const uint8_t* wire, size_t length) {
+    if (!meshEnabled) return esp_now_send(destination, wire, length) == ESP_OK;
+    Mesh::Frame frame;
+    if (!deserializePacket(wire, static_cast<int>(length), frame.packet)) return false;
+    memcpy(frame.origin, frame.packet.from, 6);
+    memcpy(frame.destination, destination, 6);
+    esp_fill_random(frame.nonce, sizeof(frame.nonce));
+    uint8_t envelope[Mesh::MAX_WIRE_LEN];
+    const size_t envelopeLength = Mesh::encode(frame, envelope);
+    return envelopeLength != 0 && sendBroadcastFrame(envelope, envelopeLength);
+}
+
+void loadNetworkPreferences() {
+    discoveryEnabled = config["discovery_enabled"] | false;
+    meshEnabled = config["mesh_enabled"] | false;
+    nearby = Discovery::State{};
+    meshState = Mesh::State{};
+    nextAliveBroadcast = millis();
+}
+
+bool setNetworkPreference(bool discovery, bool enabled) {
+    DynamicJsonDocument transaction(config.capacity());
+    if (!transaction.set(config)) return false;
+    transaction[discovery ? "discovery_enabled" : "mesh_enabled"] = enabled;
+    if (transaction.overflowed() || !saveConfig(transaction, "/m5pager/config.json")) return false;
+    config = std::move(transaction);
+    if (discovery) {
+        discoveryEnabled = enabled;
+        nearby = Discovery::State{};
+        nextAliveBroadcast = millis();
+    } else {
+        meshEnabled = enabled;
+        meshState = Mesh::State{};
+    }
+    return true;
+}
+
+bool enrollNearby(size_t selected) {
+    const auto* peer = nearby.at(selected);
+    if (peer == nullptr || millis() - peer->lastSeen > Discovery::EXPIRY_MS) return false;
+    const String address = macToString(peer->mac);
+    String contactKey = findContactKeyByMac(contacts, address);
+    if (contactKey.length() == 0) {
+        DynamicJsonDocument transaction(contacts.capacity());
+        if (!transaction.set(contacts)) return false;
+        JsonObject contact = transaction.createNestedObject(address);
+        contact["username"] = peer->name;
+        contact.createNestedArray("messages");
+        contact.createNestedObject("keys")["status"] = "none";
+        if (transaction.overflowed() || !saveContacts(transaction, "/m5pager/contacts.json")) return false;
+        contacts = std::move(transaction);
+        contactKey = address;
+    }
+    if (!selectContactPeer(contactKey.c_str())) return false;
+    selectedContact = contactKey;
+    messageScroll = 0;
+    return true;
+}
+
+void tickDiscovery() {
+    if (!discoveryEnabled || !Security::hasDevicePrivateKey()) return;
+    const size_t before = nearby.count();
+    nearby.expire(millis());
+    if (currentMenu == MENU_NEARBY && before != nearby.count()) drawNearbyMenu();
+    if (static_cast<int32_t>(millis() - nextAliveBroadcast) < 0) return;
+    nextAliveBroadcast = millis() + Discovery::INTERVAL_MS + (esp_random() % 1000);
+    MessageStruct beacon{};
+    beacon.type = P_BOARD_ONLINE;
+    esp_read_mac(beacon.from, ESP_MAC_WIFI_STA);
+    beacon.split_size = 1;
+    String name = user.substring(0, Discovery::NAME_LEN);
+    if (name.length() == 0) name = "User";
+    for (size_t index = 0; index < name.length(); index++) if (name[index] < 32 || name[index] > 126) name[index] = '_';
+    const String payload = String(Discovery::PREFIX) + name;
+    beacon.data_len = payload.length();
+    memcpy(beacon.msg, payload.c_str(), beacon.data_len);
+    uint8_t wire[PACKET_MAX_LEN];
+    const size_t length = serializePacket(beacon, wire);
+    if (length != 0) sendBroadcastFrame(wire, length);
 }
 
 /// @brief  Vyberie kontakt na základe MAC adresy a nastaví ho ako aktuálny peer pre komunikáciu. Ak peer neexistuje, pokúsi se ho pridať.
@@ -202,13 +336,13 @@ bool sendSinglePacket(PacketType type, const uint8_t* targetMac, const String& p
     size_t wireLen = serializePacket(pkt, wire);
     if (wireLen == 0) return false;
 
-    return esp_now_send(targetMac, wire, wireLen) == ESP_OK;
+    return sendApplicationPacket(targetMac, wire, wireLen);
 }
 
 /// @brief Odošle ACK správu cez ESP-NOW.
 /// @param targetMac MAC adresa cieľa
 /// @param messageId ID správy, ktorú ACKuje
-void sendMessageAck(const uint8_t* targetMac, uint16_t messageId) {
+void sendMessageAck(const uint8_t* targetMac, uint16_t messageId, const String& receipt) {
     if (targetMac == nullptr) return;
     addOrRefreshPeer(targetMac);
 
@@ -218,13 +352,15 @@ void sendMessageAck(const uint8_t* targetMac, uint16_t messageId) {
     ack.message_id = messageId;
     ack.split_size = 1;
     ack.split_index = 0;
-    ack.data_len = 0;
+    if (receipt.length() != MessageCrypto::DELIVERY_RECEIPT_LEN * 2) return;
+    ack.data_len = receipt.length();
+    memcpy(ack.msg, receipt.c_str(), ack.data_len);
 
     uint8_t wire[PACKET_MAX_LEN];
     size_t wireLen = serializePacket(ack, wire);
     if (wireLen == 0) return;
 
-    esp_now_send(targetMac, wire, wireLen);
+    sendApplicationPacket(targetMac, wire, wireLen);
 }
 
 /// @brief Zabezpečí existenciu kľúča pre danú MAC adresu. 
@@ -247,160 +383,231 @@ String ensureContactKeyForMac(const String& mac) {
 /// @brief Vyžiada výmenu kľúčov s daným kontaktom.
 /// @param contactMac MAC adresa kontaktu
 /// @return TRUE ak bol požiadavka odoslaná, FALSE pri chybe
+bool sendPeerBytes(PacketType type, const uint8_t* destination, uint16_t identifier,
+                   const uint8_t* payload, size_t length) {
+    if (length > MSG_CHUNK_SIZE || !addOrRefreshPeer(destination)) return false;
+    MessageStruct packet{};
+    packet.type = type;
+    esp_read_mac(packet.from, ESP_MAC_WIFI_STA);
+    packet.message_id = identifier;
+    packet.split_size = 1;
+    packet.data_len = static_cast<uint8_t>(length);
+    memcpy(packet.msg, payload, length);
+    uint8_t wire[PACKET_MAX_LEN];
+    const size_t encoded = serializePacket(packet, wire);
+    return encoded != 0 && sendApplicationPacket(destination, wire, encoded);
+}
+
+bool commitPeerExchange(const PeerAuth::Frame& peerFrame, bool initiator) {
+    DynamicJsonDocument transaction(contacts.capacity());
+    if (!transaction.set(contacts) ||
+        !MessageCrypto::completeHandshake(transaction, pendingExchange.contact,
+            MessageCrypto::bytesToHex(peerFrame.publicKey(), 32),
+            MessageCrypto::bytesToHex(peerFrame.ephemeral(), 32),
+            pendingExchange.ephemeralPrivate, initiator)) return false;
+    transaction[pendingExchange.contact].remove("receipts");
+    transaction[pendingExchange.contact]["keys"]["last_handshake_nonce"] =
+        MessageCrypto::bytesToHex(pendingExchange.offer.bytes + 67, 16);
+    if (transaction.overflowed() || !saveContacts(transaction, "/m5pager/contacts.json")) return false;
+    contacts = std::move(transaction);
+    Security::secureZero(pendingExchange.ephemeralPrivate, sizeof(pendingExchange.ephemeralPrivate));
+    pendingExchange.completed = true;
+    pendingExchange.attempts = 0;
+    pendingExchange.lastSent = millis();
+    pairingContact = "";
+    for (auto& assembly : assemblies) {
+        if (memcmp(assembly.from, pendingExchange.peer, 6) == 0) resetAssembly(assembly);
+    }
+    return true;
+}
+
+bool sendPeerConfirmation() {
+    pendingExchange.lastSent = millis();
+    pendingExchange.attempts++;
+    uint8_t own[6];
+    uint8_t tag[32]{};
+    esp_read_mac(own, ESP_MAC_WIFI_STA);
+    const bool valid = PeerAuth::computeTag(pendingExchange.reply, pendingExchange.reply.publicKey(),
+        own, pendingExchange.peer, pendingExchange.identifier, P_EXCH_OK, &pendingExchange.offer, tag) &&
+        sendPeerBytes(P_EXCH_OK, pendingExchange.peer, pendingExchange.identifier, tag, sizeof(tag));
+    Security::secureZero(tag, sizeof(tag));
+    return valid;
+}
+
 bool requestKeyExchange(const char* contactMac) {
-    if (contactMac == nullptr) return false;
-
-    uint8_t peerMac[6];
-    if (!parseMacAddress(contactMac, peerMac)) return false;
-    if (!addOrRefreshPeer(peerMac)) return false;
-
-    String staticPubHex;
-    if (!MessageCrypto::getOwnPublicKeyHex(staticPubHex)) return false;
-
-    uint8_t ephPriv[MessageCrypto::X25519_KEY_LEN];
-    uint8_t ephPub[MessageCrypto::X25519_KEY_LEN];
-    if (!MessageCrypto::generateEphemeralKeypair(ephPriv, ephPub)) return false;
-
-    String contactKey = findContactKeyByMac(contacts, String(contactMac));
-    if (contactKey.length() == 0) contactKey = String(contactMac);
-
-    uint16_t exchangeId = nextControlMessageId();
-
-    JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
-    keys["status"] = "pending";
-    keys["x25519_own_pub"] = staticPubHex;
-    keys["pending_id"] = exchangeId;
-    keys.remove("rekey_offer");
-    saveContacts(contacts, "/m5pager/contacts.json");
-
+    if (contactMac == nullptr || pendingExchange.active || awaitingAck || groupTransferBusy()) return false;
+    uint8_t peer[6];
+    if (!parseMacAddress(contactMac, peer) || !Mesh::unicast(peer)) return false;
+    const String contact = findContactKeyByMac(contacts, String(contactMac));
+    if (contact.length() == 0) return false;
+    uint8_t own[6];
+    esp_read_mac(own, ESP_MAC_WIFI_STA);
+    if (memcmp(own, peer, 6) == 0) return false;
     clearPendingExchange();
-    memcpy(pendingExchangeEphPriv, ephPriv, sizeof(pendingExchangeEphPriv));
-    pendingExchangeContact = contactKey;
-    pendingExchangeStartedMs = millis();
-    pendingExchangeValid = true;
-
-    String payload = staticPubHex + MessageCrypto::bytesToHex(ephPub, MessageCrypto::X25519_KEY_LEN);
-    Security::secureZero(ephPriv, sizeof(ephPriv));
-
-    bool sent = sendSinglePacket(P_INIT_EXCH, peerMac, payload, exchangeId);
-    if (!sent) clearPendingExchange();
-    return sent;
+    pendingExchange.contact = contact;
+    pendingExchange.identifier = nextControlMessageId();
+    pendingExchange.initiator = true;
+    pendingExchange.started = millis();
+    pendingExchange.lastSent = millis();
+    pendingExchange.attempts = 1;
+    memcpy(pendingExchange.peer, peer, 6);
+    bool valid = PeerAuth::create(pendingExchange.offer, pendingExchange.ephemeralPrivate);
+    const String expected = MessageCrypto::expectedPeerIdentity(contacts, contact);
+    if (valid && expected.length() != 0) {
+        uint8_t peerPublic[32]{};
+        valid = MessageCrypto::hexToBytes(expected, peerPublic, sizeof(peerPublic)) &&
+            PeerAuth::sign(pendingExchange.offer, peerPublic, own, peer, pendingExchange.identifier, P_INIT_EXCH);
+    }
+    if (!valid) { clearPendingExchange(); return false; }
+    pendingExchange.active = true;
+    if (!sendPeerBytes(P_INIT_EXCH, peer, pendingExchange.identifier, pendingExchange.offer.bytes, PeerAuth::FRAME_LEN)) {
+        clearPendingExchange();
+        return false;
+    }
+    return true;
 }
 
-/// @brief Zruší nadviazanú reláciu s kontaktom (používa sa pred zámerným prekľúčovaním).
-/// @param contactKey Kľúč kontaktu
-void clearSession(const String& contactKey) {
-    if (!contacts.containsKey(contactKey)) return;
-    JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
-    keys["status"] = "none";
-    keys.remove("tx_chain");
-    keys.remove("rx_chain");
-    keys.remove("role");
-    keys.remove("fingerprint");
-    keys.remove("rekey_offer");
-    keys.remove("pending_id");
+bool verifyPeerIdentity(const String& contact, const String& displayedFingerprint) {
+    if (!MessageCrypto::hasReadySession(contacts, contact) ||
+        (pendingExchange.active && !pendingExchange.completed) ||
+        (contacts[contact]["keys"]["handshake_version"] | 0) != 5 ||
+        displayedFingerprint.length() != MessageCrypto::FINGERPRINT_BYTES * 2 ||
+        MessageCrypto::getSessionFingerprint(contacts, contact) != displayedFingerprint) return false;
+    uint8_t own[32]{};
+    uint8_t peer[32]{};
+    const String peerHex = contacts[contact]["keys"]["x25519_peer_pub"] | "";
+    if (!MessageCrypto::getOwnPublicKey(own) || !MessageCrypto::hexToBytes(peerHex, peer, sizeof(peer)) ||
+        MessageCrypto::pairFingerprint(own, peer) != displayedFingerprint ||
+        !MessageCrypto::acceptsPeerIdentity(contacts, contact, peerHex)) return false;
+    DynamicJsonDocument transaction(contacts.capacity());
+    if (!transaction.set(contacts)) return false;
+    transaction[contact]["keys"]["verified_peer_pub"] = MessageCrypto::bytesToHex(peer, sizeof(peer));
+    transaction[contact]["keys"]["verified_own_pub"] = MessageCrypto::bytesToHex(own, sizeof(own));
+    if (transaction.overflowed() || !saveContacts(transaction, "/m5pager/contacts.json")) return false;
+    contacts = std::move(transaction);
+    return true;
 }
 
-/// @brief Spracuje paket výmeny kľúčov.
-/// @param mac_addr MAC adresa odosielateľa
-/// @param pkt Paket
-void handleKeyExchangePacket(const uint8_t* mac_addr, const MessageStruct& pkt) {
-    String senderMac = macToString(mac_addr);
-    String payload = packetPayloadToString(pkt);
+void handleKeyExchangePacket(const uint8_t* source, const MessageStruct& packet) {
+    if (pendingExchange.active && millis() - pendingExchange.started >= PeerAuth::TIMEOUT_MS) clearPendingExchange();
+    if (awaitingAck) return;
+    const String contact = findContactKeyByMac(contacts, macToString(source));
+    if (contact.length() == 0 || packet.split_size != 1 || packet.split_index != 0 ||
+        (packet.message_id & MESSAGE_ID_CONTROL_FLAG) == 0 || !handshakeBudget.allow(millis(), 2)) return;
+    uint8_t own[6];
+    esp_read_mac(own, ESP_MAC_WIFI_STA);
+    if (memcmp(source, own, 6) == 0) return;
+    const bool matchesPending = pendingExchange.active && pendingExchange.contact == contact &&
+        pendingExchange.identifier == packet.message_id && memcmp(pendingExchange.peer, source, 6) == 0;
 
-    if (pkt.type == P_EXCH_OK) {
-        return;
-    }
-
-    const size_t keyHexLen = MessageCrypto::X25519_KEY_LEN * 2;
-    if (payload.length() != keyHexLen * 2) return;
-
-    String peerPublicHex = payload.substring(0, keyHexLen);      //statický = identita
-    String peerEphemeralHex = payload.substring(keyHexLen);      //efemérny = forward secrecy
-
-    String contactKey = findContactKeyByMac(contacts, senderMac);
-    bool knownContact = contactKey.length() > 0;
-
-    if (pkt.type == P_ACK_EXCH) {
-        if (!knownContact) return;
-
-        JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
-        const char* status = keys["status"];
-        if (status == nullptr || strcmp(status, "pending") != 0) return;
-
-        uint16_t pendingId = keys["pending_id"] | 0;
-        if (pendingId == 0 || pendingId != pkt.message_id) return;
-
-        if (!pendingExchangeValid || !pendingExchangeContact.equalsIgnoreCase(contactKey)) return;
-        if (millis() - pendingExchangeStartedMs > KEY_EXCHANGE_TIMEOUT_MS) {
-            clearPendingExchange();
-            return;
-        }
-    } else {  // P_INIT_EXCH
-        if (knownContact && MessageCrypto::hasReadySession(contacts, contactKey)) {
-            JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
-
-            if (keys["rekey_offer"].is<const char*>()) return;
-
-            keys["rekey_offer"] = peerPublicHex;
-            saveContacts(contacts, "/m5pager/contacts.json");
-
-            if (currentMenu == MENU_MESSAGE && senderMac.equalsIgnoreCase(selectedContact)) {
-                drawMessageMenu();
-                showErrorToast("Re-key requested - verify first", 1500);
-                drawMessageMenu();
-            }
-            return;
-        }
-        if (!knownContact) contactKey = ensureContactKeyForMac(senderMac);
-    }
-
-    bool isInitiator = (pkt.type == P_ACK_EXCH);
-
-    uint8_t ephPriv[MessageCrypto::X25519_KEY_LEN];
-    uint8_t ephPub[MessageCrypto::X25519_KEY_LEN];
-    String ownEphemeralHex;
-
-    if (isInitiator) {
-        memcpy(ephPriv, pendingExchangeEphPriv, sizeof(ephPriv));
+    if (packet.type == P_EXCH_OK) {
+        if (!matchesPending || pendingExchange.initiator || pendingExchange.completed || packet.data_len != 32) return;
+        uint8_t expected[32]{};
+        const bool valid = PeerAuth::computeTag(pendingExchange.reply, pendingExchange.offer.publicKey(),
+            source, own, packet.message_id, P_EXCH_OK, &pendingExchange.offer, expected) &&
+            MessageCrypto::equalBytes(expected, reinterpret_cast<const uint8_t*>(packet.msg), sizeof(expected));
+        Security::secureZero(expected, sizeof(expected));
+        if (valid) commitPeerExchange(pendingExchange.offer, false);
     } else {
-        if (!MessageCrypto::generateEphemeralKeypair(ephPriv, ephPub)) return;
-        ownEphemeralHex = MessageCrypto::bytesToHex(ephPub, MessageCrypto::X25519_KEY_LEN);
+        PeerAuth::Frame frame;
+        if (!PeerAuth::parse(packet, frame) ||
+            !MessageCrypto::acceptsPeerIdentity(contacts, contact, MessageCrypto::bytesToHex(frame.publicKey(), 32))) return;
+        if (packet.type == P_ACK_EXCH) {
+            if (!matchesPending || !pendingExchange.initiator) return;
+            if (pendingExchange.completed) {
+                if (MessageCrypto::equalBytes(frame.bytes, pendingExchange.reply.bytes, PeerAuth::FRAME_LEN)) sendPeerConfirmation();
+                return;
+            }
+            if (!PeerAuth::verify(frame, source, own, packet.message_id, P_ACK_EXCH, &pendingExchange.offer)) return;
+            pendingExchange.reply = frame;
+            if (commitPeerExchange(frame, true)) sendPeerConfirmation();
+        } else if (packet.type == P_INIT_EXCH) {
+            if (pendingExchange.active) {
+                if (matchesPending && !pendingExchange.initiator &&
+                    MessageCrypto::equalBytes(frame.bytes, pendingExchange.offer.bytes, PeerAuth::FRAME_LEN)) {
+                    sendPeerBytes(P_ACK_EXCH, source, packet.message_id, pendingExchange.reply.bytes, PeerAuth::FRAME_LEN);
+                }
+                return;
+            }
+            const bool verified = MessageCrypto::hasVerifiedSession(contacts, contact);
+            const String knownIdentity = MessageCrypto::expectedPeerIdentity(contacts, contact);
+            if (!verified && !pairingAllowed(contact)) return;
+            if (knownIdentity.length() != 0 || frame.bytes[2] == PeerAuth::AUTHENTICATED) {
+                if (!PeerAuth::verify(frame, source, own, packet.message_id, P_INIT_EXCH)) return;
+            } else if (!MessageCrypto::isAllZero(frame.tag(), 32)) return;
+            const String previousNonce = contacts[contact]["keys"]["last_handshake_nonce"] | "";
+            if (previousNonce == MessageCrypto::bytesToHex(frame.bytes + 67, 16)) return;
+            clearPendingExchange();
+            pendingExchange.contact = contact;
+            pendingExchange.identifier = packet.message_id;
+            pendingExchange.started = millis();
+            pendingExchange.lastSent = millis();
+            pendingExchange.attempts = 1;
+            pendingExchange.offer = frame;
+            memcpy(pendingExchange.peer, source, 6);
+            if (!PeerAuth::create(pendingExchange.reply, pendingExchange.ephemeralPrivate) ||
+                !PeerAuth::sign(pendingExchange.reply, frame.publicKey(), own, source,
+                                packet.message_id, P_ACK_EXCH, &pendingExchange.offer)) {
+                clearPendingExchange();
+                return;
+            }
+            pendingExchange.active = true;
+            if (!sendPeerBytes(P_ACK_EXCH, source, packet.message_id, pendingExchange.reply.bytes, PeerAuth::FRAME_LEN)) {
+                clearPendingExchange();
+            }
+        }
     }
-
-    bool ok = MessageCrypto::completeHandshake(contacts, contactKey, peerPublicHex,
-                                               peerEphemeralHex, ephPriv, isInitiator);
-
-    Security::secureZero(ephPriv, sizeof(ephPriv));
-    if (isInitiator) clearPendingExchange();
-
-    if (!ok) {
-        JsonObject keys = MessageCrypto::ensureKeyObject(contacts, contactKey);
-        keys["status"] = "error";
-        saveContacts(contacts, "/m5pager/contacts.json");
-        return;
-    }
-
-    saveContacts(contacts, "/m5pager/contacts.json");
-
-    if (pkt.type == P_INIT_EXCH) {
-        String ownPublicHex;
-        if (!MessageCrypto::getOwnPublicKeyHex(ownPublicHex)) return;
-        sendSinglePacket(P_ACK_EXCH, mac_addr, ownPublicHex + ownEphemeralHex, pkt.message_id);
-    } else if (pkt.type == P_ACK_EXCH) {
-        sendSinglePacket(P_EXCH_OK, mac_addr, "", pkt.message_id);
-    }
-
-    if (currentMenu == MENU_MESSAGE && senderMac.equalsIgnoreCase(selectedContact)) {
-        drawMessageMenu();
-        showSuccessToast("Key: " + MessageCrypto::getSessionFingerprint(contacts, contactKey), 2000);
-        drawMessageMenu();
+    if (selectedContact.equalsIgnoreCase(contact)) {
+        if (currentMenu == MENU_MESSAGE) drawMessageMenu();
+        if (currentMenu == MENU_VERIFY_PEER) drawPeerVerification();
     }
 }
+uint16_t beginApplicationDelivery(const uint8_t* destination, const String& contact, const String& text, MessageCrypto::ContentKind kind) {
+    static uint16_t messageCounter = 0;
+    if (awaitingAck || destination == nullptr || text.length() == 0 ||
+        text.length() > MessageCrypto::MAX_APPLICATION_PAYLOAD ||
+        (kind == MessageCrypto::ContentKind::Text && text.length() > MAX_MESSAGE_TEXT_LEN) ||
+        (pendingExchange.active && !pendingExchange.completed) ||
+        !MessageCrypto::hasVerifiedSession(contacts, contact) || !addOrRefreshPeer(destination)) return 0;
+    uint8_t expected[6];
+    if (!parseMacAddress(contact.c_str(), expected) || memcmp(expected, destination, 6) != 0) return 0;
+    DynamicJsonDocument transaction(contacts.capacity());
+    if (!transaction.set(contacts)) return 0;
+    Delivery::Pending prepared;
+    uint16_t messageId = (messageCounter + 1) & MESSAGE_ID_VALUE_MASK;
+    if (messageId == 0) messageId = 1;
+    if (!MessageCrypto::encryptPayload(transaction, contact, text, prepared.payload, prepared.receipt, messageId, kind) ||
+        prepared.payload.length() == 0 || prepared.payload.length() > MAX_MESSAGE_PARTS * MSG_CHUNK_SIZE ||
+        prepared.receipt.length() != MessageCrypto::DELIVERY_RECEIPT_LEN * 2 ||
+        transaction.overflowed() || !saveContacts(transaction, "/m5pager/contacts.json")) return 0;
+    contacts = std::move(transaction);
+    messageCounter = messageId;
+    awaitingMsgId = messageId;
+    memcpy(awaitingMac, destination, 6);
+    pendingOutgoingReady = true;
+    pendingOutgoingContact = contact;
+    pendingOutgoingText = text;
+    pendingOutgoingKind = kind;
+    pendingDelivery = std::move(prepared);
+    awaitingAck = true;
+    transmitPendingDelivery();
+    return messageId;
+}
 
-/// @brief Handler pre prijaté ESP-NOW pakety. (nepoužítý, ale je ho treba)
-/// @param mac_addr 
-/// @param status 
+bool submitRadioPacket(const uint8_t* destination, const uint8_t* wire, size_t length) {
+    return sendApplicationPacket(destination, wire, length);
+}
+
+bool transmitPendingDelivery() {
+    uint8_t source[6];
+    esp_read_mac(source, ESP_MAC_WIFI_STA);
+    pendingDelivery.attempts++;
+    sendTimestamp = millis();
+    return Delivery::transmit(awaitingMac, source, awaitingMsgId, pendingDelivery.payload, submitRadioPacket);
+}
+
+#include "groups_runtime.h"
+
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
     Serial.print("[+] Last packet send status: ");
     Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
@@ -411,17 +618,15 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 /// @param data Prijaté dáta
 /// @param data_len Dĺžka prijatých dát
 void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
-    if (mac_addr == nullptr) return;
-
-    MessageStruct pkt;
-    if (!deserializePacket(data, data_len, pkt)) return;
+    if (mac_addr == nullptr || data == nullptr || data_len < PACKET_HEADER_LEN || data_len > MAX_RADIO_FRAME_LEN) return;
 
     uint8_t next = (rxQueueTail + 1) % RX_QUEUE_SIZE;
     if (next == rxQueueHead) return;
 
     RxQueueItem& item = rxQueue[rxQueueTail];
     memcpy(item.mac, mac_addr, 6);
-    item.pkt = pkt;
+    item.length = static_cast<uint16_t>(data_len);
+    memcpy(item.data, data, item.length);
 
     rxQueueTail = next;
 }
@@ -430,12 +635,29 @@ void onDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
 /// @param mac_addr MAC adresa odosielateľa
 /// @param pkt Paket (už overený deserializePacket)
 void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
+    if (memcmp(mac_addr, pkt.from, 6) != 0) return;
+    if (pkt.type == P_BOARD_ONLINE) {
+        if (discoveryEnabled && nearby.observe(mac_addr, pkt, millis()) && currentMenu == MENU_NEARBY) drawNearbyMenu();
+        return;
+    }
     if (pkt.type == P_MSG_ACK) {
-        if (awaitingAck && memcmp(mac_addr, awaitingMac, 6) == 0 && pkt.message_id == awaitingMsgId) {
-            awaitingAck = false;
+        const String contact = findContactKeyByMac(contacts, macToString(mac_addr));
+        if (!MessageCrypto::hasVerifiedSession(contacts, contact)) return;
+        if (awaitingAck && memcmp(mac_addr, awaitingMac, 6) == 0 && pkt.message_id == awaitingMsgId &&
+            pkt.split_size == 1 && pkt.split_index == 0 &&
+            pkt.data_len == MessageCrypto::DELIVERY_RECEIPT_LEN * 2 &&
+            packetPayloadToString(pkt) == pendingDelivery.receipt) {
             if (pendingOutgoingReady) {
                 String contactKey = pendingOutgoingContact;
-                appendMessage(contacts, contactKey, "out", pendingOutgoingText.c_str());
+                if (pendingOutgoingKind == MessageCrypto::ContentKind::Text) {
+                    DynamicJsonDocument transaction(contacts.capacity());
+                    if (!transaction.set(contacts) ||
+                        !appendMessage(transaction, contactKey, "out", pendingOutgoingText.c_str())) return;
+                    contacts = std::move(transaction);
+                } else if (!finishGroupTransfer(true)) return;
+                pendingOutgoingKind = MessageCrypto::ContentKind::Text;
+                awaitingAck = false;
+                pendingDelivery = Delivery::Pending{};
 
                 pendingOutgoingReady = false;
                 pendingOutgoingContact = "";
@@ -463,26 +685,14 @@ void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
     if (!isLastPart && pkt.data_len != MSG_CHUNK_SIZE) return;
     if (isLastPart && pkt.data_len == 0) return;
 
+    const String senderMac = macToString(mac_addr);
+    const String contactKey = findContactKeyByMac(contacts, senderMac);
+    if (contactKey.length() == 0 || !MessageCrypto::hasVerifiedSession(contacts, contactKey)) return;
     unsigned long now = millis();
-
-    if (pkt.split_index == 0) {
-        resetAssembly(assembly);
-        assembly.active = true;
-        memcpy(assembly.from, mac_addr, 6);
-        assembly.message_id = pkt.message_id;
-        assembly.expected_parts = pkt.split_size;
-        assembly.lastPacketMs = now;
-    } else {
-        if (!assembly.active) return;
-        if (memcmp(assembly.from, mac_addr, 6) != 0) return;
-        if (pkt.message_id != assembly.message_id) return;
-        if (pkt.split_size != assembly.expected_parts) return;
-        if (now - assembly.lastPacketMs > ASSEMBLY_TIMEOUT_MS) {
-            resetAssembly(assembly);
-            return;
-        }
-        assembly.lastPacketMs = now;
-    }
+    IncomingAssembly* selected = Delivery::selectAssembly(assemblies, mac_addr, pkt, now);
+    if (selected == nullptr) return;
+    IncomingAssembly& assembly = *selected;
+    assembly.lastPacketMs = now;
 
     if (pkt.split_index >= assembly.expected_parts) return;
 
@@ -507,7 +717,6 @@ void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
         totalLen += assembly.partLen[i];
     }
 
-    String senderMac = macToString(mac_addr);
     String payload;
     payload.reserve(totalLen);
     for (size_t i = 0; i < totalLen; i++) {
@@ -515,19 +724,47 @@ void processInboundPacket(const uint8_t *mac_addr, const MessageStruct& pkt) {
     }
     resetAssembly(assembly);
 
-    String contactKey = findContactKeyByMac(contacts, senderMac);
-    if (contactKey.length() == 0) return;
-
-    sendMessageAck(mac_addr, pkt.message_id);
-
-    String plaintext;
-    if (MessageCrypto::decryptPayload(contacts, contactKey, payload, plaintext)) {
-        appendMessage(contacts, contactKey, "in", plaintext.c_str());
-    } else if (MessageCrypto::hasReadySession(contacts, contactKey)) {
-        appendMessage(contacts, contactKey, "in", "[Message decrypt failed]");
-    } else {
-        appendMessage(contacts, contactKey, "in", "[Encrypted message - key missing]");
+    uint8_t digest[32];
+    if (mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+                   reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length(), digest) != 0) return;
+    const String payloadHash = MessageCrypto::bytesToHex(digest, sizeof(digest));
+    JsonArray receipts = contacts[contactKey]["receipts"].as<JsonArray>();
+    for (JsonObject accepted : receipts) {
+        if (accepted["id"].as<uint16_t>() == pkt.message_id && accepted["hash"].as<String>() == payloadHash) {
+            sendMessageAck(mac_addr, pkt.message_id, accepted["receipt"].as<String>());
+            return;
+        }
     }
+
+    DynamicJsonDocument transaction(contacts.capacity());
+    if (!transaction.set(contacts)) return;
+    String plaintext;
+    String receipt;
+    MessageCrypto::ContentKind kind;
+    if (!MessageCrypto::decryptPayload(transaction, contactKey, payload, plaintext, receipt, pkt.message_id, &kind)) return;
+    if (kind == MessageCrypto::ContentKind::Text && plaintext.length() > MAX_MESSAGE_TEXT_LEN) return;
+    JsonArray savedReceipts = transaction[contactKey]["receipts"].as<JsonArray>();
+    if (savedReceipts.isNull()) savedReceipts = transaction[contactKey].createNestedArray("receipts");
+    while (savedReceipts.size() >= Delivery::RECEIPT_CACHE_SIZE) savedReceipts.remove(0);
+    JsonObject accepted = savedReceipts.createNestedObject();
+    accepted["id"] = pkt.message_id;
+    accepted["hash"] = payloadHash;
+    accepted["receipt"] = receipt;
+    if (transaction.overflowed()) return;
+    if (kind == MessageCrypto::ContentKind::Text) {
+        if (!appendMessage(transaction, contactKey, "in", plaintext.c_str())) return;
+    } else {
+        String affected;
+        const String source = macToString(mac_addr);
+        const bool applied = kind == MessageCrypto::ContentKind::GroupControl
+            ? Groups::applyControl(groups, contacts, source, plaintext, affected)
+            : Groups::applyMessage(groups, contacts, source, plaintext, affected);
+        if (!applied) return;
+        refreshGroupsUi();
+        if (!saveContacts(transaction, "/m5pager/contacts.json")) return;
+    }
+    contacts = std::move(transaction);
+    sendMessageAck(mac_addr, pkt.message_id, receipt);
 
     if (currentMenu == MENU_MESSAGE && senderMac.equalsIgnoreCase(selectedContact)) {
         drawMessageMenu();
@@ -542,7 +779,15 @@ ZAMYKANIE
 
 /// @brief Zamkne zariadenie - vymaže kľúče aj všetky dešifrované dáta z pamäte.
 void lockDevice() {
+    while (groupTransferBusy()) if (!finishGroupTransfer(false)) break;
+    clearGroupTransient();
+    groups.clear();
+    pendingOutgoingKind = MessageCrypto::ContentKind::Text;
     Security::lockRuntimeKeys();
+    nearby = Discovery::State{};
+    meshState = Mesh::State{};
+    discoveryEnabled = false;
+    meshEnabled = false;
 
     contacts.clear();
     config.clear();
@@ -561,9 +806,15 @@ void lockDevice() {
     pendingOutgoingContact = "";
     pendingOutgoingText = "";
 
-    resetAssembly(assembly);
+    for (auto& slot : assemblies) resetAssembly(slot);
+    pendingDelivery = Delivery::Pending{};
     rxQueueHead = rxQueueTail;
     clearPendingExchange();
+    pairingContact = "";
+    pairingStartedMs = 0;
+    verificationSnapshot = "";
+    verificationConfirm = false;
+    verificationReturnMenu = MENU_MESSAGE;
 
     currentMenu = MENU_MAIN;
     menuIndex = 0;
@@ -584,8 +835,10 @@ bool unlockDevice() {
 
     if (!loadConfig(config, "/m5pager/config.json")) return false;
     if (!loadContacts(contacts, "/m5pager/contacts.json")) return false;
+    if (!Groups::load(groups)) { groups.clear(); return false; }
 
     user = config["username"] | "User";
+    loadNetworkPreferences();
 
     rxQueueHead = rxQueueTail;
     lastActivityMs = millis();
@@ -611,10 +864,40 @@ void lockAndPrompt() {
 }
 
 /// @brief Vyberie a spracuje všetky pakety odložené vo fronte. Volá sa z loop().
+void processRadioFrame(const uint8_t* previousHop, const uint8_t* wire, size_t length) {
+    if (!Security::hasDevicePrivateKey() || !Mesh::unicast(previousHop)) return;
+    if (!inboundBudget.allow(millis(), 48)) { meshState.limited++; return; }
+    if (!Mesh::matches(wire, length)) {
+        MessageStruct packet{};
+        if (deserializePacket(wire, static_cast<int>(length), packet)) processInboundPacket(previousHop, packet);
+        return;
+    }
+    if (!meshEnabled) return;
+    if (!meshState.allow(millis())) { meshState.limited++; return; }
+    Mesh::Frame frame;
+    if (!Mesh::unicast(previousHop) || !Mesh::decode(wire, length, frame)) { meshState.rejected++; return; }
+    uint8_t own[6];
+    esp_read_mac(own, ESP_MAC_WIFI_STA);
+    if (memcmp(frame.origin, own, 6) == 0) return;
+    const auto admission = meshState.remember(wire, length, millis());
+    if (admission == Mesh::Admission::Duplicate) { meshState.duplicates++; return; }
+    if (admission != Mesh::Admission::Fresh) { meshState.limited++; return; }
+    if (memcmp(frame.destination, own, 6) == 0) {
+        meshState.delivered++;
+        processInboundPacket(frame.origin, frame.packet);
+        return;
+    }
+    if (frame.remaining <= 1) { meshState.expired++; return; }
+    frame.remaining--;
+    uint8_t forwarded[Mesh::MAX_WIRE_LEN];
+    const size_t forwardedLength = Mesh::encode(frame, forwarded);
+    if (forwardedLength != 0 && sendBroadcastFrame(forwarded, forwardedLength)) meshState.forwarded++;
+}
+
 void drainRxQueue() {
-    while (rxQueueHead != rxQueueTail) {
+    for (uint8_t processed = 0; processed < 2 && rxQueueHead != rxQueueTail; processed++) {
         RxQueueItem& item = rxQueue[rxQueueHead];
-        processInboundPacket(item.mac, item.pkt);
+        processRadioFrame(item.mac, item.data, item.length);
         rxQueueHead = (rxQueueHead + 1) % RX_QUEUE_SIZE;
     }
 }
@@ -661,6 +944,7 @@ void setup() {
       return;
   }
   M5Cardputer.Display.println("[+] Config loaded.");
+  loadNetworkPreferences();
 
   wifiSsid = config["wifi_ssid"] | DEFAULT_WIFI_SSID;
   wifiPass = config["wifi_pass"] | "";
@@ -738,6 +1022,13 @@ void setup() {
       M5Cardputer.Display.println("[+] Contacts loaded.");
   }
 
+  if (!Groups::load(groups)) {
+      groups.clear();
+      lockDevice();
+      M5Cardputer.Display.println("[-] Group storage invalid. Reboot to recover.");
+      while (true) delay(1000);
+  }
+
   M5Cardputer.Display.println("[+] Setup complete.");
 
   delay(1000);
@@ -766,6 +1057,8 @@ MenuState previousMenu = MENU_MAIN;
 void loop() {
   M5Cardputer.update();
   drainRxQueue();
+  tickGroupTransfer();
+  tickDiscovery();
 
   int key = 0;
 
@@ -793,17 +1086,43 @@ void loop() {
       return;
   }
 
-  if (pendingExchangeValid && millis() - pendingExchangeStartedMs > KEY_EXCHANGE_TIMEOUT_MS) {
+  if (pendingExchange.active && millis() - pendingExchange.started > PeerAuth::TIMEOUT_MS) {
       clearPendingExchange();
   }
+  if (pairingContact.length() != 0 && millis() - pairingStartedMs >= PeerAuth::PAIRING_WINDOW_MS) {
+      pairingContact = "";
+      if (currentMenu == MENU_VERIFY_PEER) drawPeerVerification();
+  }
+  if (pendingExchange.active && pendingExchange.attempts < 4 &&
+      millis() - pendingExchange.lastSent >= 2000) {
+      if (pendingExchange.initiator && pendingExchange.completed) {
+          sendPeerConfirmation();
+      } else if (!pendingExchange.completed) {
+          pendingExchange.lastSent = millis();
+          pendingExchange.attempts++;
+          const auto& frame = pendingExchange.initiator ? pendingExchange.offer : pendingExchange.reply;
+          sendPeerBytes(pendingExchange.initiator ? P_INIT_EXCH : P_ACK_EXCH, pendingExchange.peer,
+                        pendingExchange.identifier, frame.bytes, PeerAuth::FRAME_LEN);
+      }
+  }
+
 
     //Ak nie je ACKed
-    if (awaitingAck && millis() - sendTimestamp > ACK_TIMEOUT) {
+    if (awaitingAck && millis() - sendTimestamp > Delivery::RETRY_INTERVAL_MS) {
+        if (pendingDelivery.attempts < Delivery::MAX_ATTEMPTS) {
+            transmitPendingDelivery();
+            return;
+        }
+        if (pendingOutgoingKind != MessageCrypto::ContentKind::Text) {
+            if (!finishGroupTransfer(false)) groupBatch = GroupBatch{};
+        }
+        pendingOutgoingKind = MessageCrypto::ContentKind::Text;
+        pendingDelivery = Delivery::Pending{};
         awaitingAck = false;
         pendingOutgoingReady = false;
         pendingOutgoingContact = "";
         pendingOutgoingText = "";
-        showErrorToast("Message failed to send");
+        showErrorToast("Delivery unconfirmed");
         if (currentMenu == MENU_MESSAGE) {
             drawMessageMenu();
         }

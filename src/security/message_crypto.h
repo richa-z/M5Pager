@@ -20,18 +20,21 @@ constexpr size_t AES_KEY_LEN = 32;
 constexpr char X25519_DERIVE_CONTEXT[] = "M5PAGER_X25519_ID_V1";
 constexpr size_t CHAIN_KEY_LEN = 32;
 
-constexpr char ROOT_KEY_CONTEXT[] = "M5PAGER_ROOT_V3";
-constexpr char CHAIN_I2R_CONTEXT[] = "M5PAGER_CHAIN_I2R_V3";
-constexpr char CHAIN_R2I_CONTEXT[] = "M5PAGER_CHAIN_R2I_V3";
+constexpr char ROOT_KEY_CONTEXT[] = "M5PAGER_ROOT_V5";
+constexpr char CHAIN_I2R_CONTEXT[] = "M5PAGER_CHAIN_I2R_V5";
+constexpr char CHAIN_R2I_CONTEXT[] = "M5PAGER_CHAIN_R2I_V5";
 
 constexpr uint32_t MAX_SKIPPED_MESSAGES = 256;
-constexpr char MESSAGE_AAD[] = "M5PAGER_MSG_V3";
+constexpr char MESSAGE_AAD[] = "M5PAGER_MSG_V7";
 constexpr char FINGERPRINT_CONTEXT[] = "M5PAGER_FP_V1";
 
 constexpr size_t MESSAGE_COUNTER_LEN = 4;
 constexpr uint32_t MESSAGE_COUNTER_MAX = 0xFFFFFFFFUL;
 
-constexpr size_t PAD_LENGTH_PREFIX = 2;
+constexpr size_t DELIVERY_RECEIPT_LEN = 32;
+enum class ContentKind : uint8_t { Text = 0, GroupControl = 1, GroupMessage = 2 };
+constexpr size_t MAX_APPLICATION_PAYLOAD = 900;
+constexpr size_t PAD_LENGTH_PREFIX = 3 + DELIVERY_RECEIPT_LEN;
 constexpr size_t PAD_BUCKET_LEN = 32;
 
 constexpr size_t FINGERPRINT_BYTES = 16;
@@ -464,12 +467,44 @@ inline JsonObject ensureKeyObject(DynamicJsonDocument& contacts, const String& c
 /// @param ownEphemeralPrivate Vlastný efemérny súkromný skalár
 /// @param isInitiator TRUE, ak sme výmenu začali my
 /// @return TRUE, ak sa reláciu podarilo nadviazať, inak FALSE
+inline bool equalBytes(const uint8_t* first, const uint8_t* second, size_t length) {
+    if (first == nullptr || second == nullptr) return false;
+    volatile uint8_t difference = 0;
+    for (size_t index = 0; index < length; index++) difference |= first[index] ^ second[index];
+    return difference == 0;
+}
+
+inline bool samePublicKey(const String& first, const String& second) {
+    uint8_t firstKey[X25519_KEY_LEN]{};
+    uint8_t secondKey[X25519_KEY_LEN]{};
+    const bool valid = hexToBytes(first, firstKey, sizeof(firstKey)) &&
+                       hexToBytes(second, secondKey, sizeof(secondKey)) &&
+                       !isAllZero(firstKey, sizeof(firstKey)) && equalBytes(firstKey, secondKey, sizeof(firstKey));
+    return valid;
+}
+
+inline bool acceptsPeerIdentity(DynamicJsonDocument& contacts, const String& contactKey, const String& proposed) {
+    if (!contacts.containsKey(contactKey)) return false;
+    JsonObject keys = contacts[contactKey]["keys"].as<JsonObject>();
+    const String pinned = keys["verified_peer_pub"] | "";
+    const String candidate = keys["x25519_peer_pub"] | "";
+    return (pinned.length() == 0 || samePublicKey(pinned, proposed)) &&
+           (candidate.length() == 0 || samePublicKey(candidate, proposed));
+}
+
+inline String expectedPeerIdentity(DynamicJsonDocument& contacts, const String& contactKey) {
+    JsonObject keys = contacts[contactKey]["keys"].as<JsonObject>();
+    const String pinned = keys["verified_peer_pub"] | "";
+    return pinned.length() == 0 ? String(keys["x25519_peer_pub"] | "") : pinned;
+}
+
 inline bool completeHandshake(DynamicJsonDocument& contacts,
                               const String& contactKey,
                               const String& peerStaticHex,
                               const String& peerEphemeralHex,
                               const uint8_t ownEphemeralPrivate[X25519_KEY_LEN],
                               bool isInitiator) {
+    if (!acceptsPeerIdentity(contacts, contactKey, peerStaticHex)) return false;
     uint8_t peerStatic[X25519_KEY_LEN];
     uint8_t peerEphemeral[X25519_KEY_LEN];
     uint8_t ownStaticScalar[X25519_KEY_LEN];
@@ -511,6 +546,8 @@ inline bool completeHandshake(DynamicJsonDocument& contacts,
         JsonObject keys = ensureKeyObject(contacts, contactKey);
 
         keys["status"] = "ready";
+        keys["handshake_version"] = 5;
+
         keys["x25519_peer_pub"] = peerStaticHex;
         keys["x25519_own_pub"] = bytesToHex(ownStaticPublic, X25519_KEY_LEN);
         keys["role"] = isInitiator ? "init" : "resp";
@@ -561,6 +598,18 @@ inline bool hasReadySession(DynamicJsonDocument& contacts, const String& contact
 /// @param contacts JSON dokument obsahujúci kontakty
 /// @param contactKey Kľúč kontaktu
 /// @return Fingerprint relácie, alebo prázdny reťazec, ak nie je k dispozícii
+inline bool hasVerifiedSession(DynamicJsonDocument& contacts, const String& contactKey) {
+    if (!hasReadySession(contacts, contactKey)) return false;
+    JsonObject keys = contacts[contactKey]["keys"].as<JsonObject>();
+    if ((keys["handshake_version"] | 0) != 5) return false;
+    const String peer = keys["x25519_peer_pub"] | "";
+    const String pinnedPeer = keys["verified_peer_pub"] | "";
+    const String pinnedOwn = keys["verified_own_pub"] | "";
+    uint8_t own[X25519_KEY_LEN]{};
+    if (!getOwnPublicKey(own)) return false;
+    return samePublicKey(peer, pinnedPeer) && samePublicKey(bytesToHex(own, sizeof(own)), pinnedOwn);
+}
+
 inline String getSessionFingerprint(DynamicJsonDocument& contacts, const String& contactKey) {
     if (!contacts.containsKey(contactKey)) return "";
     const char* fingerprint = contacts[contactKey]["keys"]["fingerprint"];
@@ -587,7 +636,7 @@ inline bool loadChain(DynamicJsonDocument& contacts,
                       const String& contactKey,
                       const char* field,
                       uint8_t outChain[CHAIN_KEY_LEN]) {
-    if (!hasReadySession(contacts, contactKey)) return false;
+    if (!hasVerifiedSession(contacts, contactKey)) return false;
     const char* chainHex = contacts[contactKey]["keys"][field];
     if (chainHex == nullptr) return false;
     return hexToBytes(String(chainHex), outChain, CHAIN_KEY_LEN);
@@ -624,15 +673,17 @@ inline uint32_t readCounterLE(const uint8_t in[MESSAGE_COUNTER_LEN]) {
            (static_cast<uint32_t>(in[3]) << 24);
 }
 
-constexpr size_t MESSAGE_AAD_LEN = sizeof(MESSAGE_AAD) - 1 + MESSAGE_COUNTER_LEN;
+constexpr size_t MESSAGE_AAD_LEN = sizeof(MESSAGE_AAD) - 1 + MESSAGE_COUNTER_LEN + 2;
 
 /// @brief Zostaví AAD pre správu s daným poradovým číslom.
 /// @param counter Poradové číslo správy
 /// @param out Výstupné pole veľkosti MESSAGE_AAD_LEN
-inline void buildMessageAad(uint32_t counter, uint8_t out[MESSAGE_AAD_LEN]) {
+inline void buildMessageAad(uint32_t counter, uint16_t messageId, uint8_t out[MESSAGE_AAD_LEN]) {
     constexpr size_t ctxLen = sizeof(MESSAGE_AAD) - 1;
     memcpy(out, MESSAGE_AAD, ctxLen);
     writeCounterLE(out + ctxLen, counter);
+    out[ctxLen + MESSAGE_COUNTER_LEN] = static_cast<uint8_t>(messageId & 0xFF);
+    out[ctxLen + MESSAGE_COUNTER_LEN + 1] = static_cast<uint8_t>(messageId >> 8);
 }
 
 /// @brief Vráti dĺžku doplneného bloku pre text danej dĺžky.
@@ -654,7 +705,10 @@ inline size_t paddedPlaintextLen(size_t textLen) {
 inline bool encryptPayload(DynamicJsonDocument& contacts,
                            const String& contactKey,
                            const String& plaintext,
-                           String& outBase64) {
+                           String& outBase64,
+                           String& outReceipt,
+                           uint16_t messageId, ContentKind kind = ContentKind::Text) {
+    if (plaintext.length() > MAX_APPLICATION_PAYLOAD || static_cast<uint8_t>(kind) > 2) return false;
     uint8_t chain[CHAIN_KEY_LEN];
     if (!loadChain(contacts, contactKey, "tx_chain", chain)) return false;
 
@@ -694,6 +748,8 @@ inline bool encryptPayload(DynamicJsonDocument& contacts,
     memset(padded, 0, paddedLen);
     padded[0] = static_cast<uint8_t>(textLen & 0xFF);
     padded[1] = static_cast<uint8_t>((textLen >> 8) & 0xFF);
+    esp_fill_random(padded + 2, DELIVERY_RECEIPT_LEN);
+    padded[2 + DELIVERY_RECEIPT_LEN] = static_cast<uint8_t>(kind);
     memcpy(padded + PAD_LENGTH_PREFIX, plaintext.c_str(), textLen);
 
     size_t blobLen = Security::GCM_IV_LEN + Security::GCM_TAG_LEN + MESSAGE_COUNTER_LEN + paddedLen;
@@ -714,7 +770,7 @@ inline bool encryptPayload(DynamicJsonDocument& contacts,
     writeCounterLE(counterField, counter);
 
     uint8_t aad[MESSAGE_AAD_LEN];
-    buildMessageAad(counter, aad);
+    buildMessageAad(counter, messageId, aad);
 
     bool ok = Security::aesGcmEncrypt(aesKey,
                                       padded,
@@ -728,6 +784,7 @@ inline bool encryptPayload(DynamicJsonDocument& contacts,
         ok = base64Encode(blob, blobLen, outBase64);
     }
     if (ok) {
+        outReceipt = bytesToHex(padded + 2, DELIVERY_RECEIPT_LEN);
         keys["tx_chain"] = bytesToHex(nextChain, CHAIN_KEY_LEN);
         keys["tx_counter"] = counter;
     }
@@ -751,7 +808,9 @@ inline bool encryptPayload(DynamicJsonDocument& contacts,
 inline bool decryptPayload(DynamicJsonDocument& contacts,
                            const String& contactKey,
                            const String& encodedPayload,
-                           String& outPlaintext) {
+                           String& outPlaintext,
+                           String& outReceipt,
+                           uint16_t messageId, ContentKind* outKind = nullptr) {
     uint8_t chain[CHAIN_KEY_LEN];
     if (!loadChain(contacts, contactKey, "rx_chain", chain)) return false;
 
@@ -806,7 +865,7 @@ inline bool decryptPayload(DynamicJsonDocument& contacts,
     }
 
     uint8_t aad[MESSAGE_AAD_LEN];
-    buildMessageAad(counter, aad);
+    buildMessageAad(counter, messageId, aad);
 
     ok = Security::aesGcmDecrypt(aesKey,
                                  ciphertext,
@@ -822,13 +881,23 @@ inline bool decryptPayload(DynamicJsonDocument& contacts,
         } else {
             size_t textLen = static_cast<size_t>(plaintext[0]) |
                              (static_cast<size_t>(plaintext[1]) << 8);
-            if (textLen > ciphertextLen - PAD_LENGTH_PREFIX) {
+            const uint8_t kind = plaintext[2 + DELIVERY_RECEIPT_LEN];
+            if (textLen > ciphertextLen - PAD_LENGTH_PREFIX || textLen > MAX_APPLICATION_PAYLOAD ||
+                kind > 2 || (outKind == nullptr && kind != 0)) {
                 ok = false;
             } else {
                 plaintext[PAD_LENGTH_PREFIX + textLen] = '\0';
                 outPlaintext = String(reinterpret_cast<char*>(plaintext + PAD_LENGTH_PREFIX));
-                keys["rx_chain"] = bytesToHex(nextChain, CHAIN_KEY_LEN);
-                keys["rx_counter"] = counter;
+                outReceipt = bytesToHex(plaintext + 2, DELIVERY_RECEIPT_LEN);
+                if (outPlaintext.length() != textLen) {
+                    outPlaintext = "";
+                    outReceipt = "";
+                    ok = false;
+                } else {
+                    if (outKind != nullptr) *outKind = static_cast<ContentKind>(kind);
+                    keys["rx_chain"] = bytesToHex(nextChain, CHAIN_KEY_LEN);
+                    keys["rx_counter"] = counter;
+                }
             }
         }
     }

@@ -216,7 +216,7 @@ inline bool decryptEncryptedBlob(const uint8_t* fileBytes,
 /// @param filename Názov súboru
 /// @param label Popis súboru
 /// @return TRUE, ak sa operácia podarila, inak FALSE
-inline bool saveJsonEncrypted(const DynamicJsonDocument& doc, const char* filename, const char* label) {
+inline bool saveJsonEncrypted(const JsonDocument& doc, const char* filename, const char* label) {
     if (!Security::hasFilesystemKey()) {
         M5Cardputer.Display.println("[-] Storage key not available.");
         return false;
@@ -248,7 +248,7 @@ inline bool saveJsonEncrypted(const DynamicJsonDocument& doc, const char* filena
 /// @param label Popis súboru
 /// @param defaultJson Predvolený JSON obsah
 /// @return TRUE, ak sa operácia podarila, inak FALSE
-inline bool loadJsonEncryptedAware(DynamicJsonDocument& doc,
+inline bool loadJsonEncryptedAware(JsonDocument& doc,
                                    const char* filename,
                                    const char* label,
                                    const char* defaultJson) {
@@ -313,7 +313,8 @@ inline bool loadJsonEncryptedAware(DynamicJsonDocument& doc,
     }
     free(fileBytes);
 
-    DeserializationError error = deserializeJson(doc, jsonBytes, jsonLen);
+    DeserializationError error = deserializeJson(doc, static_cast<const uint8_t*>(jsonBytes), jsonLen);
+    Security::secureZero(jsonBytes, jsonLen);
     free(jsonBytes);
     if (error) {
         M5Cardputer.Display.print("[-] JSON parse error in ");

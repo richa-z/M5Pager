@@ -30,7 +30,7 @@ You need at least two of them to actually message anyone.
 
 If you want the gory details, read the source in `src/security/` — `message_crypto.h` and `device_key_store.h` are heavily commented (in Slovak).
 
-> **Heads up on security:** this is a hobby/experimental project, not an audited secure-messaging product. A self-audit was done, however it might not have found all weaknesses of the project in it's current state. Please think twice before using this to message sensitive information long-term.
+> **Heads up on security:** this is a hobby/experimental project, not an audited secure-messaging product. Please think twice before using this to message sensitive information long-term.
 
 ## Building & flashing
 

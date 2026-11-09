@@ -7,6 +7,8 @@
 #include "security/message_crypto.h"
 #include "util/text_input.h"
 #include "types.h"
+#include "transport/reliable_delivery.h"
+#include <utility>
 
 #define MSG_CHUNK_SIZE 180
 
@@ -29,6 +31,10 @@ extern String pendingOutgoingContact;
 extern String pendingOutgoingText;
 bool selectContactPeer(const char* contactMac);
 bool requestKeyExchange(const char* contactMac);
+extern Delivery::Pending pendingDelivery;
+bool transmitPendingDelivery();
+bool groupTransferBusy();
+uint16_t beginApplicationDelivery(const uint8_t* destination, const String& contact, const String& text, MessageCrypto::ContentKind kind);
 
 // Konštanty pre rozloženie chatovacej obrazovky
 constexpr int CHAT_PANEL_X = 6;
@@ -166,71 +172,8 @@ void clampMessageScroll() {
 /// @param text Text správy pre odoslanie
 /// @return ID odoslanej správy, alebo 0 pri chybe
 uint16_t sendSplitMessage(const uint8_t* targetMac, const String& contactKey, const String& text) {
-    static uint16_t messageCounter = 0;
-    if (targetMac == nullptr || text.length() == 0) return 0;
-    if (!esp_now_is_peer_exist(targetMac)) return 0;
-
-    String encryptedPayload;
-    if (!MessageCrypto::encryptPayload(contacts, contactKey, text, encryptedPayload)) {
-        return 0;
-    }
-
-    if (!saveContacts(contacts, "/m5pager/contacts.json")) {
-        return 0;
-    }
-
-    //najvyssi bit len pre control pakety
-    messageCounter = (messageCounter + 1) & MESSAGE_ID_VALUE_MASK;
-    if (messageCounter == 0) messageCounter = 1;
-
-    uint16_t msgId = messageCounter;
-    int totalLen = encryptedPayload.length();
-    uint8_t totalParts = (totalLen + MSG_CHUNK_SIZE - 1) / MSG_CHUNK_SIZE;
-    if (totalParts == 0 || totalParts > MAX_MESSAGE_PARTS) return 0;
-
-    awaitingAck = true;
-    awaitingMsgId = msgId;
-    memcpy(awaitingMac, targetMac, 6); //ACK len od toho co poslal
-    sendTimestamp = millis();
-    pendingOutgoingReady = true;
-    pendingOutgoingContact = contactKey;
-    pendingOutgoingText = text;
-
-    for (uint8_t i = 0; i < totalParts; i++) {
-        MessageStruct pkt{};
-        pkt.type = P_MSG;
-        esp_read_mac(pkt.from, ESP_MAC_WIFI_STA);
-
-        pkt.message_id = msgId;
-        pkt.split_size = totalParts;
-        pkt.split_index = i;
-
-        int offset = i * MSG_CHUNK_SIZE;
-        pkt.data_len = min(MSG_CHUNK_SIZE, totalLen - offset);
-        memcpy(pkt.msg, encryptedPayload.c_str() + offset, pkt.data_len);
-
-        uint8_t wire[PACKET_MAX_LEN];
-        size_t wireLen = serializePacket(pkt, wire);
-        if (wireLen == 0) {
-            awaitingAck = false;
-            pendingOutgoingReady = false;
-            pendingOutgoingContact = "";
-            pendingOutgoingText = "";
-            return 0;
-        }
-
-        esp_err_t sendResult = esp_now_send(targetMac, wire, wireLen);
-        if (sendResult != ESP_OK) {
-            awaitingAck = false;
-            pendingOutgoingReady = false;
-            pendingOutgoingContact = "";
-            pendingOutgoingText = "";
-            return 0;
-        }
-        delay(10);
-    }
-
-    return msgId;
+    if (groupTransferBusy() || text.length() > MAX_MESSAGE_TEXT_LEN) return 0;
+    return beginApplicationDelivery(targetMac, contactKey, text, MessageCrypto::ContentKind::Text);
 }
 
 /// @brief Nakreslí jednu časť bubliny správy.
@@ -348,7 +291,7 @@ void drawMessageMenu() {
         return;
     }
 
-    bool secureReady = MessageCrypto::hasReadySession(contacts, selectedContact);
+    bool secureReady = MessageCrypto::hasVerifiedSession(contacts, selectedContact);
     bool rekeyPending = MessageCrypto::hasPendingRekeyOffer(contacts, selectedContact);
     String person = contacts[selectedContact]["username"] | "";
 
@@ -356,9 +299,9 @@ void drawMessageMenu() {
     if (rekeyPending) {
         headerLabel = "Re-key requested - verify!";
     } else if (secureReady) {
-        headerLabel = "Secure - " + MessageCrypto::getSessionFingerprint(contacts, selectedContact);
+        headerLabel = "Verified encrypted session";
     } else {
-        headerLabel = "Key exchange needed";
+        headerLabel = "Unverified - V: verify / exchange";
     }
     drawInputCard(headerLabel, person, "-", CHAT_HEADER_Y, CHAT_HEADER_H);
 
@@ -434,11 +377,15 @@ void drawMessageMenu() {
     } else {
         M5Cardputer.Display.setTextColor(uiTextMutedColor(), footerColor);
         M5Cardputer.Display.setCursor(CHAT_PANEL_X + 6, footerY + 13);
-        M5Cardputer.Display.print(secureReady ? "Enter compose, ;/. scroll" : "Enter starts key exchange");
+        M5Cardputer.Display.print(secureReady ? "Enter compose, V verify, ;/. scroll" : "Enter / V: verify identity first");
     }
 }
 
 void handleMessageInput(int key) {
+    if (!isTypingMsg && (key == 'v' || key == 'V')) {
+        currentMenu = MENU_VERIFY_PEER;
+        return;
+    }
     if (!isTypingMsg && key == KEY_BACKSPACE) {
         currentMenu = MENU_CONTACTS;
         return;
@@ -467,13 +414,8 @@ void handleMessageInput(int key) {
     }
 
     if (!isTypingMsg && key == KEY_ENTER) {
-        if (!MessageCrypto::hasReadySession(contacts, selectedContact)) {
-            if (requestKeyExchange(selectedContact.c_str())) {
-                showSuccessToast("Key exchange started", 700);
-            } else {
-                showErrorToast("Key exchange failed");
-            }
-            drawMessageMenu();
+        if (!MessageCrypto::hasVerifiedSession(contacts, selectedContact)) {
+            currentMenu = MENU_VERIFY_PEER;
             return;
         }
         isTypingMsg = true;
@@ -494,13 +436,10 @@ void handleMessageInput(int key) {
                 return;
             }
 
-            if (!MessageCrypto::hasReadySession(contacts, selectedContact)) {
-                if (requestKeyExchange(selectedContact.c_str())) {
-                    showSuccessToast("Key exchange started", 700);
-                } else {
-                    showErrorToast("Key exchange failed");
-                }
-                drawMessageMenu();
+            if (!MessageCrypto::hasVerifiedSession(contacts, selectedContact)) {
+                isTypingMsg = false;
+                messageInput = "";
+                currentMenu = MENU_VERIFY_PEER;
                 return;
             }
 

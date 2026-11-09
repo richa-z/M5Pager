@@ -7,7 +7,9 @@
 #include <String.h>
 #include "enums/packet_types.h"
 
-#define PROTO_VERSION 3
+#define PROTO_VERSION 7
+
+constexpr size_t PEER_HANDSHAKE_FRAME_LEN = 115;
 
 #define PACKET_HEADER_LEN 13
 #define PACKET_MAX_LEN (PACKET_HEADER_LEN + MSG_CHUNK_SIZE)
@@ -67,7 +69,8 @@ inline bool deserializePacket(const uint8_t* data, int len, MessageStruct& out) 
     out.data_len = data[12];
 
     if (out.data_len > MSG_CHUNK_SIZE) return false;
-    if (static_cast<int>(out.data_len) > len - PACKET_HEADER_LEN) return false;
+    if (static_cast<int>(out.data_len) != len - PACKET_HEADER_LEN) return false;
+    if (data[1] > static_cast<uint8_t>(P_EXCH_OK)) return false;
 
     if (out.data_len > 0) {
         memcpy(out.msg, data + PACKET_HEADER_LEN, out.data_len);
@@ -103,7 +106,10 @@ inline void resetAssembly(IncomingAssembly& assembly) {
     memset(&assembly, 0, sizeof(assembly));
 }
 
+constexpr size_t MAX_RADIO_FRAME_LEN = 250;
+
 typedef struct RxQueueItem {
     uint8_t mac[6];
-    MessageStruct pkt;
+    uint8_t data[MAX_RADIO_FRAME_LEN];
+    uint16_t length;
 } RxQueueItem;

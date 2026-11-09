@@ -12,10 +12,10 @@ extern String selectedContact;
 extern DynamicJsonDocument contacts;
 extern String editContactName;
 bool requestKeyExchange(const char* contactMac);
-void clearSession(const String& contactKey);
+
 
 const char* contactOptions[] = {
-    "Start Key Exchange",
+    "Exchange / verify identity",
     "Edit Username",
     "Delete Contact",
     "Back"
@@ -37,7 +37,7 @@ void drawContactOptions() {
     if (MessageCrypto::hasPendingRekeyOffer(contacts, selectedContact)) {
         keyLabel = "Re-key requested - verify!";
     } else if (MessageCrypto::hasReadySession(contacts, selectedContact)) {
-        keyLabel = "Secure - " + MessageCrypto::getSessionFingerprint(contacts, selectedContact);
+        keyLabel = MessageCrypto::hasVerifiedSession(contacts, selectedContact) ? "Verified identity" : "Unverified - compare fingerprint";
     } else {
         keyLabel = "Selected contact - no key";
     }
@@ -74,16 +74,8 @@ void handleContactOptionsInput(int key) {
 
     if (key == KEY_ENTER) {
         switch (menuIndex) {
-            case 0: // Start key exchange
-                // Prichadzajuci paket ju prepisať nemoze -> handleKeyExchangePacket
-                clearSession(selectedContact);
-                if (requestKeyExchange(selectedContact.c_str())) {
-                    drawContactOptions();
-                    showSuccessToast("Key exchange started", 700);
-                } else {
-                    drawContactOptions();
-                    showErrorToast("Key exchange failed");
-                }
+            case 0:
+                currentMenu = MENU_VERIFY_PEER;
                 break;
 
             case 1: // Edit name

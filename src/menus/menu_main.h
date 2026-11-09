@@ -22,6 +22,8 @@ void handleMainMenuInput(int key) {
         switch (menuIndex) {
             case 0: currentMenu = MENU_CONTACTS; break;
             case 1: currentMenu = MENU_SETTINGS; break;
+            case 2: currentMenu = MENU_NETWORK; break;
+            case 3: currentMenu = MENU_GROUPS; break;
         }
         menuIndex = 0;
     }
